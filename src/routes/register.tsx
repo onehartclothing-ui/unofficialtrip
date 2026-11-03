@@ -1,7 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { PageShell } from "@/components/site/PageShell";
 import { TRIP, COHORT_OPTIONS, buildUpiLink, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 import {
@@ -10,7 +9,7 @@ import {
   type GuestRegistrationSession,
 } from "@/lib/registration.functions";
 
-const SESSION_KEY = "titu_coorg2026_reg_v1";
+const SESSION_KEY = "titu_coorg2026_reg_v2";
 
 export const Route = createFileRoute("/register")({
   head: () => ({
@@ -50,6 +49,7 @@ async function fileToBase64(file: File): Promise<string> {
 
 function RegisterPage() {
   const [reg, setReg] = useState<GuestRegistrationSession | null>(null);
+  const [editingDraft, setEditingDraft] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -58,7 +58,18 @@ function RegisterPage() {
       if (saved) {
         const parsed = JSON.parse(saved) as GuestRegistrationSession;
         if (parsed && parsed.id && parsed.booking_id) {
-          setReg(parsed);
+          // If the saved session is still awaiting payment, ensure its session token hasn't expired
+          const isSubmitted =
+            parsed.status === "pending_verification" || parsed.status === "confirmed";
+          const isNotExpired =
+            parsed.session_expires_at &&
+            new Date(parsed.session_expires_at).getTime() > Date.now() &&
+            /^[0-9a-f]{64}$/.test(parsed.session_token ?? "");
+          if (isSubmitted || isNotExpired) {
+            setReg(parsed);
+          } else {
+            sessionStorage.removeItem(SESSION_KEY);
+          }
         }
       }
     } catch {
@@ -69,6 +80,7 @@ function RegisterPage() {
 
   function updateReg(next: GuestRegistrationSession | null) {
     setReg(next);
+    setEditingDraft(false);
     try {
       if (next) {
         sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
@@ -90,24 +102,34 @@ function RegisterPage() {
 
   return (
     <PageShell>
-      {!reg ? (
-        <DetailsStep onDone={updateReg} />
+      {!reg || editingDraft ? (
+        <DetailsStep initial={reg} onDone={updateReg} />
       ) : reg.status === "pending_verification" || reg.status === "confirmed" ? (
         <Submitted reg={reg} onReset={() => updateReg(null)} />
       ) : (
-        <PaymentStep reg={reg} onDone={updateReg} onBack={() => updateReg(null)} />
+        <PaymentStep
+          reg={reg}
+          onDone={updateReg}
+          onBack={() => setEditingDraft(true)}
+        />
       )}
     </PageShell>
   );
 }
 
-function DetailsStep({ onDone }: { onDone: (r: GuestRegistrationSession) => void }) {
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [cohort, setCohort] = useState("");
-  const [terms, setTerms] = useState(false);
-  const [refund, setRefund] = useState(false);
+function DetailsStep({
+  initial,
+  onDone,
+}: {
+  initial: GuestRegistrationSession | null;
+  onDone: (r: GuestRegistrationSession) => void;
+}) {
+  const [fullName, setFullName] = useState(initial?.full_name ?? "");
+  const [email, setEmail] = useState(initial?.email ?? "");
+  const [phone, setPhone] = useState(initial?.phone ?? "");
+  const [cohort, setCohort] = useState(initial?.cohort ?? "");
+  const [terms, setTerms] = useState(Boolean(initial));
+  const [refund, setRefund] = useState(Boolean(initial));
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
@@ -143,36 +165,16 @@ function DetailsStep({ onDone }: { onDone: (r: GuestRegistrationSession) => void
 
     setBusy(true);
     try {
-      // 1. Try security-definer RPC first
-      const { data: rpcData, error: rpcError } = await supabase.rpc("create_registration", {
-        _full_name: trimmedName,
-        _email: emailCheck.email,
-        _phone: phoneCheck.phone,
-        _cohort: cohort,
-        _policy_version: TRIP.policyVersion,
-      });
-
-      if (!rpcError && rpcData) {
-        onDone(rpcData as unknown as GuestRegistrationSession);
-        return;
-      }
-
-      // If RPC returned a user-facing validation/duplicate error, surface it directly
-      if (
-        rpcError &&
-        !rpcError.message.includes("Could not find the function") &&
-        !rpcError.message.includes("permission denied")
-      ) {
-        throw new Error(rpcError.message);
-      }
-
-      // 2. Fallback to server function if database RPC migration hasn't been applied yet
       const serverSession = await createGuestRegistrationServer({
         data: {
           fullName: trimmedName,
           email: emailCheck.email,
           phone: phoneCheck.phone,
           cohort,
+          sessionToken:
+            initial?.session_token && /^[0-9a-f]{64}$/.test(initial.session_token)
+              ? initial.session_token
+              : undefined,
         },
       });
       onDone(serverSession);
@@ -350,44 +352,12 @@ function PaymentStep({
     setBusy(true);
     try {
       const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
-      const path = `${reg.user_id}/${Date.now()}.${ext}`;
-
-      // 1. Try uploading directly to Supabase Storage + calling security-definer RPC
-      const up = await supabase.storage
-        .from("payment-screenshots")
-        .upload(path, file, { contentType: file.type });
-
-      if (!up.error) {
-        const { data: rpcData, error: rpcError } = await supabase.rpc("submit_payment", {
-          _registration_id: reg.id,
-          _user_id: reg.user_id,
-          _utr: cleanedUtr,
-          _screenshot_path: path,
-          _policy_version: TRIP.policyVersion,
-        });
-
-        if (!rpcError && rpcData) {
-          onDone(rpcData as unknown as GuestRegistrationSession);
-          return;
-        }
-
-        if (
-          rpcError &&
-          !rpcError.message.includes("Could not find the function") &&
-          !rpcError.message.includes("permission denied")
-        ) {
-          throw new Error(rpcError.message);
-        }
-      }
-
-      // 2. Fallback to server function if storage RLS or RPC migration isn't applied yet
-      const base64 = up.error ? await fileToBase64(file) : undefined;
+      const base64 = await fileToBase64(file);
       const updated = await submitGuestPaymentServer({
         data: {
           registrationId: reg.id,
-          userId: reg.user_id,
+          sessionToken: reg.session_token,
           utr: cleanedUtr,
-          screenshotPath: up.error ? undefined : path,
           fileBase64: base64,
           fileType: file.type,
           fileExt: ext,

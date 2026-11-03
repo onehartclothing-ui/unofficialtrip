@@ -30,6 +30,8 @@ export type Database = {
           reviewed_at: string | null
           reviewed_by: string | null
           screenshot_path: string | null
+          session_expires_at: string | null
+          session_token_hash: string | null
           status: Database["public"]["Enums"]["reg_status"]
           terms_accepted_at: string | null
           updated_at: string
@@ -51,10 +53,12 @@ export type Database = {
           reviewed_at?: string | null
           reviewed_by?: string | null
           screenshot_path?: string | null
+          session_expires_at?: string | null
+          session_token_hash?: string | null
           status?: Database["public"]["Enums"]["reg_status"]
           terms_accepted_at?: string | null
           updated_at?: string
-          user_id: string
+          user_id?: string
           utr?: string | null
         }
         Update: {
@@ -72,6 +76,8 @@ export type Database = {
           reviewed_at?: string | null
           reviewed_by?: string | null
           screenshot_path?: string | null
+          session_expires_at?: string | null
+          session_token_hash?: string | null
           status?: Database["public"]["Enums"]["reg_status"]
           terms_accepted_at?: string | null
           updated_at?: string
@@ -103,86 +109,12 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      create_registration:
-      | {
-        Args: { _full_name: string; _phone: string }
-        Returns: {
-          admin_note: string | null
-          booking_id: string
-          cohort: string | null
-          created_at: string
-          email: string
-          full_name: string
-          id: string
-          payment_submitted_at: string | null
-          phone: string
-          policy_version: string | null
-          refund_ack_accepted_at: string | null
-          reviewed_at: string | null
-          reviewed_by: string | null
-          screenshot_path: string | null
-          status: Database["public"]["Enums"]["reg_status"]
-          terms_accepted_at: string | null
-          updated_at: string
-          user_id: string
-          utr: string | null
-        }
-      }
-      | {
-        Args: {
-          _cohort: string
-          _email: string
-          _full_name: string
-          _phone: string
-          _policy_version: string
-        }
-        Returns: Json
-      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
           _user_id: string
         }
         Returns: boolean
-      }
-      submit_payment:
-      | {
-        Args: {
-          _policy_version: string
-          _screenshot_path: string
-          _utr: string
-        }
-        Returns: {
-          admin_note: string | null
-          booking_id: string
-          cohort: string | null
-          created_at: string
-          email: string
-          full_name: string
-          id: string
-          payment_submitted_at: string | null
-          phone: string
-          policy_version: string | null
-          refund_ack_accepted_at: string | null
-          reviewed_at: string | null
-          reviewed_by: string | null
-          screenshot_path: string | null
-          status: Database["public"]["Enums"]["reg_status"]
-          terms_accepted_at: string | null
-          updated_at: string
-          user_id: string
-          utr: string | null
-        }
-      }
-      | {
-        Args: {
-          _policy_version: string
-          _registration_id: string
-          _screenshot_path: string
-          _user_id: string
-          _utr: string
-        }
-        Returns: Json
       }
     }
     Enums: {
