@@ -23,7 +23,7 @@ function Privacy() {
       <p className="eyebrow mt-4 text-muted-foreground">Version {TRIP.policyVersion}</p>
       <div className="mt-10 space-y-6 leading-relaxed text-bone/85">
         <h2 className="font-display text-3xl">What we collect</h2>
-        <p>Your full name, email address, phone number, UPI transaction ID (UTR), payment screenshot, and the time you accepted our terms.</p>
+        <p>Your full name, email address, phone number, cohort, UPI transaction ID (UTR), payment screenshot, and the time you accepted our terms.</p>
         <h2 className="font-display text-3xl">Why</h2>
         <p>Only to manage your registration for Coorg 2026, verify your payment and contact you about the trip.</p>
         <h2 className="font-display text-3xl">Who can see it</h2>

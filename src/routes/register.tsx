@@ -1,13 +1,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
-import type { Tables } from "@/integrations/supabase/types";
-import { useAuth } from "@/hooks/useAuth";
 import { PageShell } from "@/components/site/PageShell";
-import { TRIP, buildUpiLink, STATUS_LABEL } from "@/lib/trip";
+import { TRIP, COHORT_OPTIONS, buildUpiLink, validateEmail, normalizeIndianPhone } from "@/lib/trip";
+import {
+  createGuestRegistrationServer,
+  submitGuestPaymentServer,
+  type GuestRegistrationSession,
+} from "@/lib/registration.functions";
 
-type Reg = Tables<"registrations">;
+const SESSION_KEY = "titu_coorg2026_reg_v1";
 
 export const Route = createFileRoute("/register")({
   head: () => ({
@@ -15,7 +18,7 @@ export const Route = createFileRoute("/register")({
       { title: "Register — Coorg 2026 | Titu Backpackers" },
       { name: "description", content: "Register for the Coorg 2026 student trip, 20–22 November. ₹8,500 per person via UPI." },
       { property: "og:title", content: "Register — Coorg 2026" },
-      { property: "og:description", content: "Verify your email, pay ₹8,500 via UPI, pack your bags." },
+      { property: "og:description", content: "Register, pay ₹8,500 via UPI, and pack your bags." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
     ],
@@ -23,137 +26,293 @@ export const Route = createFileRoute("/register")({
   component: RegisterPage,
 });
 
-const input = "w-full rounded-md border border-input bg-transparent px-4 py-3.5 text-base text-bone placeholder:text-muted-foreground focus:border-ember focus:outline-none";
-const primaryBtn = "w-full rounded-full bg-ember px-6 py-4 font-display text-xl text-ink transition-opacity disabled:opacity-40";
-const ghostBtn = "w-full rounded-full border border-border px-6 py-4 font-display text-lg text-bone hover:border-bone";
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : (e as { message?: string })?.message ?? "Something went wrong");
+const input =
+  "w-full rounded-md border border-input bg-transparent px-4 py-3.5 text-base text-bone placeholder:text-muted-foreground focus:border-ember focus:outline-none";
+const primaryBtn =
+  "w-full rounded-full bg-ember px-6 py-4 font-display text-xl text-ink transition-opacity disabled:opacity-40";
+const ghostBtn =
+  "w-full rounded-full border border-border px-6 py-4 font-display text-lg text-bone hover:border-bone";
+const errMsg = (e: unknown) =>
+  e instanceof Error ? e.message : (e as { message?: string })?.message ?? "Something went wrong";
+
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const idx = result.indexOf(",");
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = () => reject(new Error("Could not read screenshot file"));
+    reader.readAsDataURL(file);
+  });
+}
 
 function RegisterPage() {
-  const { user, loading } = useAuth();
-  const [reg, setReg] = useState<Reg | null | undefined>(undefined);
+  const [reg, setReg] = useState<GuestRegistrationSession | null>(null);
+  const [hydrated, setHydrated] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!user) { setReg(null); return; }
-    const { data } = await supabase.from("registrations").select("*").eq("user_id", user.id).maybeSingle();
-    setReg(data);
-  }, [user]);
-  useEffect(() => { if (!loading) load(); }, [loading, load]);
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as GuestRegistrationSession;
+        if (parsed && parsed.id && parsed.booking_id) {
+          setReg(parsed);
+        }
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    setHydrated(true);
+  }, []);
 
-  let body;
-  if (loading || (user && reg === undefined)) body = <p className="eyebrow text-muted-foreground">Loading…</p>;
-  else if (!user) body = <AuthStep />;
-  else if (!reg) body = <DetailsStep onDone={setReg} />;
-  else if (reg.status === "pending_verification") body = <Submitted reg={reg} />;
-  else if (reg.status === "confirmed") body = <Confirmed reg={reg} />;
-  else body = <PaymentStep reg={reg} onDone={setReg} />;
+  function updateReg(next: GuestRegistrationSession | null) {
+    setReg(next);
+    try {
+      if (next) {
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
+      } else {
+        sessionStorage.removeItem(SESSION_KEY);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  if (!hydrated) {
+    return (
+      <PageShell>
+        <p className="eyebrow text-muted-foreground">Loading…</p>
+      </PageShell>
+    );
+  }
 
   return (
     <PageShell>
-      {body}
-      {user && (
-        <button onClick={() => supabase.auth.signOut()} className="eyebrow mt-12 text-muted-foreground hover:text-bone">
-          Sign out ({user.email})
-        </button>
+      {!reg ? (
+        <DetailsStep onDone={updateReg} />
+      ) : reg.status === "pending_verification" || reg.status === "confirmed" ? (
+        <Submitted reg={reg} onReset={() => updateReg(null)} />
+      ) : (
+        <PaymentStep reg={reg} onDone={updateReg} onBack={() => updateReg(null)} />
       )}
     </PageShell>
   );
 }
 
-function AuthStep() {
-  const [mode, setMode] = useState<"signup" | "signin">("signup");
+function DetailsStep({ onDone }: { onDone: (r: GuestRegistrationSession) => void }) {
+  const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [phone, setPhone] = useState("");
+  const [cohort, setCohort] = useState("");
+  const [terms, setTerms] = useState(false);
+  const [refund, setRefund] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [sent, setSent] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+
+    const trimmedName = fullName.trim();
+    if (trimmedName.length < 2) {
+      toast.error("Please enter your full name");
+      return;
+    }
+
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      toast.error(emailCheck.error ?? "Please enter a valid email address");
+      return;
+    }
+
+    const phoneCheck = normalizeIndianPhone(phone);
+    if (!phoneCheck.valid) {
+      toast.error(phoneCheck.error ?? "Please enter a valid 10-digit Indian mobile number");
+      return;
+    }
+
+    if (!cohort) {
+      toast.error("Please select which cohort you are in");
+      return;
+    }
+
+    if (!terms || !refund) {
+      toast.error("Please accept the Terms & Conditions and no-refund policy");
+      return;
+    }
+
     setBusy(true);
     try {
-      if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
-          email: email.trim().toLowerCase(),
-          password,
-          options: { emailRedirectTo: `${window.location.origin}/register` },
-        });
-        if (error) throw error;
-        setSent(true);
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
-        if (error) throw error;
+      // 1. Try security-definer RPC first
+      const { data: rpcData, error: rpcError } = await supabase.rpc("create_registration", {
+        _full_name: trimmedName,
+        _email: emailCheck.email,
+        _phone: phoneCheck.phone,
+        _cohort: cohort,
+        _policy_version: TRIP.policyVersion,
+      });
+
+      if (!rpcError && rpcData) {
+        onDone(rpcData as unknown as GuestRegistrationSession);
+        return;
       }
-    } catch (e) {
-      toast.error(errMsg(e));
+
+      // If RPC returned a user-facing validation/duplicate error, surface it directly
+      if (
+        rpcError &&
+        !rpcError.message.includes("Could not find the function") &&
+        !rpcError.message.includes("permission denied")
+      ) {
+        throw new Error(rpcError.message);
+      }
+
+      // 2. Fallback to server function if database RPC migration hasn't been applied yet
+      const serverSession = await createGuestRegistrationServer({
+        data: {
+          fullName: trimmedName,
+          email: emailCheck.email,
+          phone: phoneCheck.phone,
+          cohort,
+        },
+      });
+      onDone(serverSession);
+    } catch (err) {
+      toast.error(errMsg(err));
     } finally {
       setBusy(false);
     }
   }
 
-  if (sent)
-    return (
-      <div>
-        <p className="eyebrow text-ember">Step 1 of 3</p>
-        <h1 className="font-display mt-3 text-6xl md:text-7xl">Check your inbox.</h1>
-        <p className="mt-6 text-bone/80">We sent a verification link to <strong>{email}</strong>. Open it on this device to continue. Can't find it? Check spam.</p>
-        <button onClick={() => { setSent(false); setMode("signin"); }} className={`${ghostBtn} mt-10`}>Already verified? Sign in</button>
-      </div>
-    );
-
   return (
     <div>
-      <p className="eyebrow text-ember">Step 1 of 3</p>
-      <h1 className="font-display mt-3 text-6xl md:text-8xl">{mode === "signup" ? "Count me in." : "Welcome back."}</h1>
-      <p className="mt-4 text-bone/80">Use your Mesa email. We verify it before you can pay.</p>
-      <form onSubmit={submit} className="mt-10 space-y-4">
-        <label className="block"><span className="eyebrow mb-2 block text-muted-foreground">Mesa email address</span>
-          <input className={input} type="email" required autoComplete="email" maxLength={255} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@mesa..." />
+      <p className="eyebrow text-ember">Step 1 of 2 · Registration</p>
+      <h1 className="font-display mt-3 text-6xl md:text-8xl">Count me in.</h1>
+      <p className="mt-3 text-bone/80">Fill in your details below to proceed to payment.</p>
+
+      <form onSubmit={submit} className="mt-8 space-y-5">
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Full Name</span>
+          <input
+            className={input}
+            type="text"
+            required
+            minLength={2}
+            maxLength={100}
+            autoComplete="name"
+            placeholder="Your full name"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+          />
         </label>
-        <label className="block"><span className="eyebrow mb-2 block text-muted-foreground">Password</span>
-          <input className={input} type="password" required minLength={8} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} />
+
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Mesa Email ID</span>
+          <input
+            className={input}
+            type="email"
+            required
+            maxLength={255}
+            autoComplete="email"
+            placeholder="you@mesabusinessschool.org"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
         </label>
-        <button disabled={busy} className={primaryBtn}>{busy ? "…" : mode === "signup" ? "Verify my email →" : "Sign in →"}</button>
+
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Phone Number</span>
+          <input
+            className={input}
+            type="tel"
+            inputMode="tel"
+            required
+            autoComplete="tel"
+            placeholder="+91 98765 43210"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+          />
+        </label>
+
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Which cohort are you in?</span>
+          <select
+            className={`${input} bg-ink`}
+            required
+            value={cohort}
+            onChange={(e) => setCohort(e.target.value)}
+          >
+            <option value="" disabled className="bg-ink text-muted-foreground">
+              Select your cohort
+            </option>
+            {COHORT_OPTIONS.map((opt) => (
+              <option key={opt} value={opt} className="bg-ink text-bone">
+                {opt}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="rounded-xl border border-border bg-card p-5">
+          <p className="font-display text-2xl text-bone">COORG 2026</p>
+          <p className="eyebrow mt-1.5 text-muted-foreground">20–22 NOVEMBER</p>
+          <p className="font-display mt-2 text-2xl text-ember">₹8,500 / PERSON</p>
+        </div>
+
+        <div className="space-y-3 pt-1">
+          <label className="flex cursor-pointer gap-3 text-sm leading-relaxed">
+            <input
+              type="checkbox"
+              required
+              checked={terms}
+              onChange={(e) => setTerms(e.target.checked)}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]"
+            />
+            <span>
+              I agree to the{" "}
+              <Link to="/terms" target="_blank" className="underline">
+                Terms & Conditions
+              </Link>{" "}
+              and{" "}
+              <Link to="/privacy" target="_blank" className="underline">
+                Privacy Policy
+              </Link>
+              .
+            </span>
+          </label>
+
+          <label className="flex cursor-pointer gap-3 text-sm leading-relaxed">
+            <input
+              type="checkbox"
+              required
+              checked={refund}
+              onChange={(e) => setRefund(e.target.checked)}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]"
+            />
+            <span>
+              I understand that my ₹8,500 payment is non-refundable if I voluntarily cancel, subject to applicable law.
+            </span>
+          </label>
+        </div>
+
+        <button type="submit" disabled={busy || !terms || !refund} className={primaryBtn}>
+          {busy ? "Saving…" : "CONTINUE TO PAYMENT →"}
+        </button>
       </form>
-      <button onClick={() => setMode(mode === "signup" ? "signin" : "signup")} className="eyebrow mt-6 text-muted-foreground hover:text-bone">
-        {mode === "signup" ? "Already registered? Sign in" : "New here? Create account"}
-      </button>
     </div>
   );
 }
 
-function DetailsStep({ onDone }: { onDone: (r: Reg) => void }) {
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    const { data, error } = await supabase.rpc("create_registration", { _full_name: name, _phone: phone.replace(/[\s-]/g, "") });
-    setBusy(false);
-    if (error) { toast.error(error.message); return; }
-    onDone(data as Reg);
-  }
-  return (
-    <div>
-      <p className="eyebrow text-ember">Step 2 of 3 · Email verified ✓</p>
-      <h1 className="font-display mt-3 text-6xl md:text-7xl">Who's coming?</h1>
-      <form onSubmit={submit} className="mt-10 space-y-4">
-        <label className="block"><span className="eyebrow mb-2 block text-muted-foreground">Full name</span>
-          <input className={input} required minLength={2} maxLength={100} autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="block"><span className="eyebrow mb-2 block text-muted-foreground">Phone number</span>
-          <input className={input} required type="tel" inputMode="tel" autoComplete="tel" pattern="\+?[0-9\s\-]{10,16}" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+91 98765 43210" />
-        </label>
-        <button disabled={busy} className={primaryBtn}>{busy ? "…" : "Continue to payment →"}</button>
-      </form>
-    </div>
-  );
-}
-
-function PaymentStep({ reg, onDone }: { reg: Reg; onDone: (r: Reg) => void }) {
+function PaymentStep({
+  reg,
+  onDone,
+  onBack,
+}: {
+  reg: GuestRegistrationSession;
+  onDone: (r: GuestRegistrationSession) => void;
+  onBack: () => void;
+}) {
   const [copied, setCopied] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const [terms, setTerms] = useState(false);
-  const [refund, setRefund] = useState(false);
   const [utr, setUtr] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
@@ -170,18 +329,71 @@ function PaymentStep({ reg, onDone }: { reg: Reg; onDone: (r: Reg) => void }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!file) { toast.error("Upload your payment screenshot"); return; }
-    if (!file.type.startsWith("image/")) { toast.error("Screenshot must be an image"); return; }
-    if (file.size > 5 * 1024 * 1024) { toast.error("Screenshot must be under 5 MB"); return; }
+    const cleanedUtr = utr.replace(/\s+/g, "").toUpperCase();
+    if (!/^[A-Z0-9]{8,30}$/.test(cleanedUtr)) {
+      toast.error("Please enter a valid UPI Transaction ID / UTR (8–30 alphanumeric characters)");
+      return;
+    }
+    if (!file) {
+      toast.error("Upload your payment screenshot");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      toast.error("Screenshot must be an image");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Screenshot must be under 5 MB");
+      return;
+    }
+
     setBusy(true);
     try {
       const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
       const path = `${reg.user_id}/${Date.now()}.${ext}`;
-      const up = await supabase.storage.from("payment-screenshots").upload(path, file, { contentType: file.type });
-      if (up.error) throw up.error;
-      const { data, error } = await supabase.rpc("submit_payment", { _utr: utr.trim(), _screenshot_path: path, _policy_version: TRIP.policyVersion });
-      if (error) throw error;
-      onDone(data as Reg);
+
+      // 1. Try uploading directly to Supabase Storage + calling security-definer RPC
+      const up = await supabase.storage
+        .from("payment-screenshots")
+        .upload(path, file, { contentType: file.type });
+
+      if (!up.error) {
+        const { data: rpcData, error: rpcError } = await supabase.rpc("submit_payment", {
+          _registration_id: reg.id,
+          _user_id: reg.user_id,
+          _utr: cleanedUtr,
+          _screenshot_path: path,
+          _policy_version: TRIP.policyVersion,
+        });
+
+        if (!rpcError && rpcData) {
+          onDone(rpcData as unknown as GuestRegistrationSession);
+          return;
+        }
+
+        if (
+          rpcError &&
+          !rpcError.message.includes("Could not find the function") &&
+          !rpcError.message.includes("permission denied")
+        ) {
+          throw new Error(rpcError.message);
+        }
+      }
+
+      // 2. Fallback to server function if storage RLS or RPC migration isn't applied yet
+      const base64 = up.error ? await fileToBase64(file) : undefined;
+      const updated = await submitGuestPaymentServer({
+        data: {
+          registrationId: reg.id,
+          userId: reg.user_id,
+          utr: cleanedUtr,
+          screenshotPath: up.error ? undefined : path,
+          fileBase64: base64,
+          fileType: file.type,
+          fileExt: ext,
+        },
+      });
+      onDone(updated);
     } catch (e) {
       toast.error(errMsg(e));
     } finally {
@@ -191,116 +403,132 @@ function PaymentStep({ reg, onDone }: { reg: Reg; onDone: (r: Reg) => void }) {
 
   return (
     <div>
-      <p className="eyebrow text-ember">Step 3 of 3 · {STATUS_LABEL[reg.status]}</p>
-      {reg.status === "rejected" && (
-        <div className="mt-4 rounded-md border border-destructive p-4 text-sm">
-          Your last payment submission needs review{reg.admin_note ? `: ${reg.admin_note}` : "."} Please resubmit or DM @{TRIP.instagram}.
-        </div>
-      )}
+      <p className="eyebrow text-ember">Step 2 of 2 · Payment</p>
       <h1 className="font-display mt-3 text-6xl md:text-8xl">One last thing.</h1>
-      <p className="mt-3 text-lg text-bone/80">Pay. Confirm. Pack your bags.</p>
+      <p className="mt-3 text-lg text-bone/80">Pay ₹8,500 via UPI and submit your payment proof below.</p>
 
-      <div className="mt-10 rounded-xl border border-border bg-card p-6 md:p-8">
+      <div className="mt-8 rounded-xl border border-border bg-card p-6 md:p-8">
         <p className="eyebrow text-muted-foreground">Total amount</p>
         <p className="font-display mt-2 text-6xl">{TRIP.priceLabel}</p>
-        <p className="eyebrow mt-8 text-muted-foreground">Pay to this UPI ID</p>
+
+        <p className="eyebrow mt-8 text-muted-foreground">UPI ID</p>
         <p className="mt-2 break-all font-mono text-lg md:text-xl">{TRIP.upiId}</p>
         <p className="mt-2 text-xs text-muted-foreground">Reference: {reg.booking_id}</p>
-        <div className="mt-6 grid gap-3 md:grid-cols-2">
-          <button type="button" onClick={copy} className={copied ? `${primaryBtn} bg-bone` : primaryBtn}>{copied ? "UPI ID copied!" : "Copy UPI ID"}</button>
-          <a href={buildUpiLink(reg.booking_id)} onClick={() => setTimeout(() => setShowHelp(true), 1500)} className={`${ghostBtn} text-center md:hidden`}>Pay via UPI app</a>
+
+        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={copy}
+            className={copied ? `${primaryBtn} bg-bone` : primaryBtn}
+          >
+            {copied ? "UPI ID copied!" : "Copy UPI ID"}
+          </button>
+          <a
+            href={buildUpiLink(reg.booking_id)}
+            onClick={() => setTimeout(() => setShowHelp(true), 1500)}
+            className={`${ghostBtn} flex items-center justify-center text-center`}
+          >
+            Pay via UPI App
+          </a>
         </div>
+
         {showHelp && (
           <p className="mt-4 text-sm text-muted-foreground">
-            If no app opened: open GPay, PhonePe, Paytm or your bank app → Pay to UPI ID → paste <span className="font-mono text-bone">{TRIP.upiId}</span> → enter ₹8,500 → add {reg.booking_id} as the note. Opening an app does not confirm payment.
+            If no app opened: open GPay, PhonePe, Paytm or your bank app → Pay to UPI ID → paste{" "}
+            <span className="font-mono text-bone">{TRIP.upiId}</span> → enter ₹8,500 → add{" "}
+            {reg.booking_id} as the note. Opening an app does not confirm payment.
           </p>
         )}
       </div>
 
       <form onSubmit={submit} className="mt-10 space-y-5">
-        <p className="eyebrow">After paying, come back here</p>
-        <label className="block"><span className="eyebrow mb-2 block text-muted-foreground">UPI Transaction ID / UTR number</span>
-          <input className={input} required value={utr} onChange={(e) => setUtr(e.target.value.replace(/\s/g, ""))} pattern="[A-Za-z0-9]{8,30}" maxLength={30} placeholder="e.g. 431298765432" />
+        <p className="eyebrow">After paying, submit your payment proof</p>
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">UPI Transaction ID / UTR</span>
+          <input
+            className={input}
+            required
+            value={utr}
+            onChange={(e) => setUtr(e.target.value.replace(/\s/g, ""))}
+            pattern="[A-Za-z0-9]{8,30}"
+            maxLength={30}
+            placeholder="e.g. 431298765432"
+          />
         </label>
-        <label className="block"><span className="eyebrow mb-2 block text-muted-foreground">Payment screenshot</span>
-          <input type="file" accept="image/*" required onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            className="block w-full text-sm text-muted-foreground file:mr-4 file:rounded-full file:border-0 file:bg-pine file:px-4 file:py-2.5 file:text-bone" />
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Payment screenshot</span>
+          <input
+            type="file"
+            accept="image/*"
+            required
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            className="block w-full text-sm text-muted-foreground file:mr-4 file:rounded-full file:border-0 file:bg-pine file:px-4 file:py-2.5 file:text-bone"
+          />
         </label>
-        <label className="flex gap-3 text-sm leading-relaxed">
-          <input type="checkbox" checked={terms} onChange={(e) => setTerms(e.target.checked)} className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]" />
-          <span>I agree to the <Link to="/terms" target="_blank" className="underline">Terms & Conditions</Link> and <Link to="/privacy" target="_blank" className="underline">Privacy Policy</Link>.</span>
-        </label>
-        <label className="flex gap-3 text-sm leading-relaxed">
-          <input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]" />
-          <span>I understand that my ₹8,500 payment is non-refundable if I voluntarily cancel, subject to applicable law.</span>
-        </label>
-        <button disabled={busy || !terms || !refund} className={primaryBtn}>{busy ? "Uploading…" : "I've paid ₹8,500"}</button>
+        <button type="submit" disabled={busy} className={primaryBtn}>
+          {busy ? "Uploading…" : "I'VE PAID ₹8,500 →"}
+        </button>
       </form>
+
+      <button
+        type="button"
+        onClick={onBack}
+        className="eyebrow mt-8 text-muted-foreground hover:text-bone"
+      >
+        ← Edit registration details
+      </button>
     </div>
   );
 }
 
-function Submitted({ reg }: { reg: Reg }) {
+function Submitted({
+  reg,
+  onReset,
+}: {
+  reg: GuestRegistrationSession;
+  onReset: () => void;
+}) {
   return (
     <div>
-      <h1 className="font-display text-6xl md:text-8xl">Payment submitted!</h1>
-      <p className="mt-4 text-lg text-bone/80">Your payment is awaiting verification.</p>
+      <p className="eyebrow text-ember">Pending Verification</p>
+      <h1 className="font-display mt-3 text-6xl md:text-8xl">YOU'RE ALMOST IN!</h1>
+      <p className="mt-4 text-lg text-bone/80">
+        Your payment details have been submitted and are awaiting verification.
+      </p>
       <div className="mt-10 rounded-xl border border-border bg-card p-6">
         <p className="eyebrow text-muted-foreground">Status</p>
         <p className="font-display mt-2 text-3xl text-amber">Pending verification</p>
         <dl className="mt-6 grid grid-cols-2 gap-4 text-sm">
-          <div><dt className="eyebrow text-muted-foreground">Booking ref</dt><dd className="mt-1 font-mono">{reg.booking_id}</dd></div>
-          <div><dt className="eyebrow text-muted-foreground">UTR</dt><dd className="mt-1 font-mono">{reg.utr}</dd></div>
+          <div>
+            <dt className="eyebrow text-muted-foreground">Booking ref</dt>
+            <dd className="mt-1 font-mono">{reg.booking_id}</dd>
+          </div>
+          <div>
+            <dt className="eyebrow text-muted-foreground">UTR</dt>
+            <dd className="mt-1 font-mono">{reg.utr}</dd>
+          </div>
+          <div>
+            <dt className="eyebrow text-muted-foreground">Participant</dt>
+            <dd className="mt-1">{reg.full_name}</dd>
+          </div>
+          {reg.cohort && (
+            <div>
+              <dt className="eyebrow text-muted-foreground">Cohort</dt>
+              <dd className="mt-1">{reg.cohort}</dd>
+            </div>
+          )}
         </dl>
       </div>
-      <p className="mt-6 text-sm text-muted-foreground">An organizer will manually check that ₹8,500 was received. Come back to this page anytime to see your status.</p>
-    </div>
-  );
-}
-
-function downloadConfirmation(reg: Reg) {
-  const c = document.createElement("canvas");
-  c.width = 1080; c.height = 1350;
-  const g = c.getContext("2d")!;
-  const css = getComputedStyle(document.documentElement);
-  const ink = "#0B0D0C", bone = "#F4F0E8", ember = "#E86B35";
-  void css;
-  g.fillStyle = ink; g.fillRect(0, 0, 1080, 1350);
-  g.fillStyle = ember; g.fillRect(80, 80, 120, 8);
-  g.fillStyle = bone;
-  g.font = "500 28px 'JetBrains Mono', monospace"; g.fillText("TITU BACKPACKERS · BOOKING CONFIRMATION", 80, 150);
-  g.font = "180px Anton, Impact, sans-serif"; g.fillText("COORG", 80, 390); g.fillText("2026", 80, 580);
-  const rows: [string, string][] = [
-    ["PARTICIPANT", reg.full_name], ["BOOKING ID", reg.booking_id], ["DATES", "20–22 November 2026"],
-    ["AMOUNT", "₹8,500"], ["STATUS", "PAYMENT VERIFIED"],
-  ];
-  rows.forEach(([k, v], i) => {
-    const y = 720 + i * 110;
-    g.fillStyle = "#B9C0BA"; g.font = "500 24px 'JetBrains Mono', monospace"; g.fillText(k, 80, y);
-    g.fillStyle = k === "STATUS" ? ember : bone; g.font = "500 44px 'Space Grotesk', sans-serif"; g.fillText(v, 80, y + 52);
-  });
-  g.fillStyle = "#B9C0BA"; g.font = "22px 'Space Grotesk', sans-serif";
-  g.fillText("Unofficial student-organized trip. Not an official Mesa event.", 80, 1290);
-  const a = document.createElement("a");
-  a.download = `${reg.booking_id}.png`; a.href = c.toDataURL("image/png"); a.click();
-}
-
-function Confirmed({ reg }: { reg: Reg }) {
-  return (
-    <div>
-      <p className="eyebrow text-ember">Payment verified ✓</p>
-      <h1 className="font-display mt-3 text-6xl md:text-8xl">You're officially going to Coorg!</h1>
-      <div className="mt-10 rounded-xl border border-border bg-card p-6">
-        <dl className="grid gap-5 text-sm sm:grid-cols-2">
-          <div><dt className="eyebrow text-muted-foreground">Participant</dt><dd className="mt-1 text-lg">{reg.full_name}</dd></div>
-          <div><dt className="eyebrow text-muted-foreground">Booking ID</dt><dd className="mt-1 font-mono text-lg">{reg.booking_id}</dd></div>
-          <div><dt className="eyebrow text-muted-foreground">Trip</dt><dd className="mt-1 text-lg">Coorg 2026</dd></div>
-          <div><dt className="eyebrow text-muted-foreground">Dates</dt><dd className="mt-1 text-lg">20–22 November 2026</dd></div>
-          <div><dt className="eyebrow text-muted-foreground">Amount</dt><dd className="mt-1 text-lg">₹8,500</dd></div>
-          <div><dt className="eyebrow text-muted-foreground">Status</dt><dd className="mt-1 text-lg text-ember">Payment Verified</dd></div>
-        </dl>
-      </div>
-      <button onClick={() => downloadConfirmation(reg)} className={`${primaryBtn} mt-8`}>Download confirmation</button>
+      <p className="mt-6 text-sm text-muted-foreground">
+        An organizer will manually verify that ₹8,500 was received before confirming your booking.
+      </p>
+      <button
+        type="button"
+        onClick={onReset}
+        className="eyebrow mt-8 text-muted-foreground hover:text-bone"
+      >
+        Register another participant →
+      </button>
     </div>
   );
 }

@@ -23,7 +23,69 @@ export const Route = createFileRoute("/admin")({
   component: AdminPage,
 });
 
-const FILTERS = ["all", "pending_verification", "confirmed", "rejected", "email_verified"] as const;
+const FILTERS = ["all", "pending_verification", "confirmed", "rejected", "registration_started"] as const;
+
+const input =
+  "w-full rounded-md border border-input bg-transparent px-4 py-3.5 text-base text-bone placeholder:text-muted-foreground focus:border-ember focus:outline-none";
+const primaryBtn =
+  "w-full rounded-full bg-ember px-6 py-4 font-display text-xl text-ink transition-opacity disabled:opacity-40";
+
+function AdminLoginForm() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
+        password,
+      });
+      if (error) throw error;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to sign in");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="max-w-md">
+      <p className="eyebrow text-ember">Organizer Access</p>
+      <h1 className="font-display mt-3 text-5xl md:text-7xl">Admin Sign In.</h1>
+      <p className="mt-3 text-sm text-bone/80">Sign in with your organizer credentials to review registrations and verify payments.</p>
+      <form onSubmit={submit} className="mt-8 space-y-4">
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Organizer email</span>
+          <input
+            className={input}
+            type="email"
+            required
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Password</span>
+          <input
+            className={input}
+            type="password"
+            required
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        <button type="submit" disabled={busy} className={primaryBtn}>
+          {busy ? "Signing in…" : "Sign in →"}
+        </button>
+      </form>
+    </div>
+  );
+}
 
 function AdminPage() {
   const { user, loading } = useAuth();
@@ -63,7 +125,7 @@ function AdminPage() {
   }
 
   function exportCsv() {
-    const cols = ["booking_id", "full_name", "email", "phone", "status", "utr", "payment_submitted_at", "terms_accepted_at", "policy_version", "reviewed_at"] as const;
+    const cols = ["booking_id", "full_name", "email", "phone", "cohort", "status", "utr", "payment_submitted_at", "terms_accepted_at", "policy_version", "reviewed_at"] as const;
     const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const csv = [cols.join(","), ...shown.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
     const a = document.createElement("a");
@@ -72,9 +134,18 @@ function AdminPage() {
   }
 
   if (loading) return <Wrap><p className="eyebrow">Loading…</p></Wrap>;
-  if (!user) return <Wrap><p>Sign in first on the <Link to="/register" className="underline">register page</Link>, then come back.</p></Wrap>;
+  if (!user) return <Wrap><AdminLoginForm /></Wrap>;
   if (isAdmin === null) return <Wrap><p className="eyebrow">Checking access…</p></Wrap>;
-  if (!isAdmin) return <Wrap><p>This area is for organizers only.</p></Wrap>;
+  if (!isAdmin) {
+    return (
+      <Wrap>
+        <p>This area is for organizers only.</p>
+        <button onClick={() => supabase.auth.signOut()} className="eyebrow mt-6 text-muted-foreground hover:text-bone">
+          Sign out ({user.email})
+        </button>
+      </Wrap>
+    );
+  }
 
   const count = (s: string) => rows.filter((r) => r.status === s).length;
 
@@ -82,7 +153,12 @@ function AdminPage() {
     <Wrap>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <h1 className="font-display text-5xl md:text-7xl">Organizers.</h1>
-        <button onClick={exportCsv} className="rounded-full border border-border px-5 py-2.5 eyebrow hover:border-bone">Export CSV</button>
+        <div className="flex items-center gap-3">
+          <button onClick={exportCsv} className="rounded-full border border-border px-5 py-2.5 eyebrow hover:border-bone">Export CSV</button>
+          <button onClick={() => supabase.auth.signOut()} className="rounded-full border border-border px-4 py-2.5 eyebrow text-muted-foreground hover:border-bone hover:text-bone">
+            Sign out
+          </button>
+        </div>
       </div>
       <div className="mt-6 grid grid-cols-3 gap-3">
         {([["Pending", "pending_verification"], ["Confirmed", "confirmed"], ["Review", "rejected"]] as const).map(([l, s]) => (
@@ -103,7 +179,9 @@ function AdminPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-lg font-medium">{r.full_name}</p>
-                <p className="text-sm text-muted-foreground">{r.email} · {r.phone}</p>
+                <p className="text-sm text-muted-foreground">
+                  {r.email} · {r.phone}{r.cohort ? ` · ${r.cohort}` : ""}
+                </p>
                 <p className="mt-1 font-mono text-xs text-muted-foreground">{r.booking_id}</p>
               </div>
               <span className="eyebrow rounded-full border border-border px-3 py-1">{STATUS_LABEL[r.status] ?? r.status}</span>
