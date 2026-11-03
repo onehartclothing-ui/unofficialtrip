@@ -235,15 +235,15 @@ function DetailsStep({
       return;
     }
 
-    const emailCheck = validateEmail(email);
-    if (!emailCheck.valid) {
-      toast.error(emailCheck.error ?? "Please enter a valid email address");
+    const emailRes = validateEmail(email);
+    if (!emailRes.valid) {
+      toast.error(emailRes.error ?? "Please enter a valid email address");
       return;
     }
 
-    const phoneCheck = normalizeIndianPhone(phone);
-    if (!phoneCheck.valid) {
-      toast.error(phoneCheck.error ?? "Please enter a valid 10-digit Indian mobile number");
+    const phoneRes = normalizeIndianPhone(phone);
+    if (!phoneRes.valid) {
+      toast.error(phoneRes.error ?? "Please enter a valid 10-digit Indian mobile number");
       return;
     }
 
@@ -257,15 +257,15 @@ function DetailsStep({
       return;
     }
 
-    // If the student went back from the payment page and hasn't changed any of the 4 fields,
+    // If the student went back from the payment page and hasn't changed any of the fields,
     // return directly to their active payment screen without creating a duplicate database request.
     const isUnchangedDraft =
       initial &&
       initial.status !== "pending_verification" &&
       initial.status !== "confirmed" &&
       initial.full_name === trimmedName &&
-      initial.email === emailCheck.email &&
-      initial.phone === phoneCheck.phone &&
+      (initial.email ?? null) === emailRes.email &&
+      initial.phone === phoneRes.phone &&
       initial.cohort === cohort &&
       initial.session_expires_at &&
       new Date(initial.session_expires_at).getTime() > Date.now() &&
@@ -284,8 +284,8 @@ function DetailsStep({
       const serverSession = await createGuestRegistrationServer({
         data: {
           fullName: trimmedName,
-          email: emailCheck.email,
-          phone: phoneCheck.phone,
+          email: emailRes.email,
+          phone: phoneRes.phone,
           cohort,
           registrationId: hasValidSessionToken ? initial.id : undefined,
           sessionToken: hasValidSessionToken ? initial.session_token : undefined,
@@ -337,7 +337,7 @@ function DetailsStep({
 
       <form onSubmit={submit} className="mt-8 space-y-5">
         <label className="block">
-          <span className="eyebrow mb-2 block text-muted-foreground">Full Name</span>
+          <span className="eyebrow mb-2 block text-muted-foreground">Full Name *</span>
           <input
             className={input}
             type="text"
@@ -345,43 +345,42 @@ function DetailsStep({
             minLength={2}
             maxLength={100}
             autoComplete="name"
-            placeholder="Your full name"
+            placeholder="Enter your full name"
             value={fullName}
             onChange={(e) => setFullName(e.target.value)}
           />
         </label>
 
         <label className="block">
-          <span className="eyebrow mb-2 block text-muted-foreground">Mesa Email ID</span>
-          <input
-            className={input}
-            type="email"
-            required
-            maxLength={255}
-            autoComplete="email"
-            placeholder="you@mesabusinessschool.org"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-        </label>
-
-        <label className="block">
-          <span className="eyebrow mb-2 block text-muted-foreground">Phone Number</span>
+          <span className="eyebrow mb-2 block text-muted-foreground">Phone Number *</span>
           <input
             className={input}
             type="tel"
             inputMode="tel"
             required
             autoComplete="tel"
-            placeholder="+91 98765 43210"
+            placeholder="Enter your 10-digit mobile number"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
           />
         </label>
 
         <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Email Address (Optional)</span>
+          <input
+            className={input}
+            type="email"
+            maxLength={255}
+            autoComplete="email"
+            placeholder="Enter your email address (optional)"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+
+        <label className="block">
           <span className="eyebrow mb-2 block text-muted-foreground">
-            Which cohort are you in?
+            Which cohort are you in? *
           </span>
           <select
             className={`${input} bg-ink`}
@@ -443,8 +442,12 @@ function DetailsStep({
           </label>
         </div>
 
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Your booking confirmation and trip details will be shared via your registered phone number and email address (if provided).
+        </p>
+
         <button type="submit" disabled={busy || !terms || !refund} className={primaryBtn}>
-          {busy ? "Saving…" : "CONTINUE TO PAYMENT →"}
+          {busy ? "Saving…" : "CONTINUE TO PAYMENT — ₹8,500"}
         </button>
       </form>
     </div>
@@ -609,6 +612,13 @@ function PaymentStep({
             <div>
               <p className="eyebrow text-muted-foreground">Participant</p>
               <p className="mt-1 text-base text-bone">{reg.full_name}</p>
+            </div>
+            <div>
+              <p className="eyebrow text-muted-foreground">Contact</p>
+              <p className="mt-1 text-base text-bone">
+                {reg.phone}
+                {reg.email ? ` · ${reg.email}` : ""}
+              </p>
             </div>
             <div>
               <p className="eyebrow text-muted-foreground">Cohort</p>

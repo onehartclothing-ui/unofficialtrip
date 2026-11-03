@@ -18,7 +18,10 @@ export const COHORT_OPTIONS = ["UGC 1", "UGC 2"] as const;
  */
 export const ALLOWED_EMAIL_DOMAINS: readonly string[] = [];
 
-export function validateEmail(raw: string): { valid: boolean; email: string; error?: string } {
+export function validateEmail(raw?: string | null): { valid: boolean; email: string | null; error?: string } {
+  if (!raw || !raw.trim()) {
+    return { valid: true, email: null };
+  }
   const email = raw.trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
     return { valid: false, email, error: "Please enter a valid email address" };

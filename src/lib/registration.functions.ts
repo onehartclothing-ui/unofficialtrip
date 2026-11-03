@@ -11,7 +11,7 @@ export type GuestRegistrationSession = {
   id: string;
   booking_id: string;
   full_name: string;
-  email: string;
+  email: string | null;
   phone: string;
   cohort: string | null;
   status: string;
@@ -61,7 +61,7 @@ const ALLOWED_IMAGE_MIMES = new Set([
 
 const createGuestRegSchema = z.object({
   fullName: z.string().trim().min(2, "Please enter your full name").max(100),
-  email: z.string().trim().max(255),
+  email: z.string().trim().max(255).optional().nullable(),
   phone: z.string().trim().min(10).max(20),
   cohort: z.string().trim().min(1, "Please select your cohort").max(100),
   registrationId: z.string().uuid().optional(),
@@ -126,7 +126,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
             .from("registrations")
             .update({
               full_name: data.fullName,
-              email: emailRes.email,
+              email: emailRes.email ?? `guest_${ownReg.booking_id.toLowerCase().replace(/[^a-z0-9]/g, "")}@titubackpackers.internal`,
               phone: phoneRes.phone,
               cohort: data.cohort,
               session_token_hash: newTokenHash,
@@ -145,7 +145,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
               id: updated.id,
               booking_id: updated.booking_id,
               full_name: updated.full_name,
-              email: updated.email,
+              email: emailRes.email,
               phone: updated.phone,
               cohort: updated.cohort,
               status: updated.status,
@@ -162,10 +162,15 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
     // 2. Create a fresh registration attempt with its own unique booking reference (TB-COORG-XXXXXX).
     //    Never block a student because their email or phone was used before, and never overwrite existing records.
     const guestUserId = crypto.randomUUID();
+    const tempTag = generateBookingSessionToken().slice(0, 8);
+    // If database column email still has NOT NULL in production before the migration runs,
+    // provide an internal synthetic email fallback while keeping actual student email as null in session
+    const storedEmail = emailRes.email ?? `guest_${tempTag}@titubackpackers.internal`;
+
     const basePayload = {
       user_id: guestUserId,
       full_name: data.fullName,
-      email: emailRes.email,
+      email: storedEmail,
       phone: phoneRes.phone,
       cohort: data.cohort,
       status: "registration_started" as const,
@@ -187,7 +192,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
         id: inserted.id,
         booking_id: inserted.booking_id,
         full_name: inserted.full_name,
-        email: inserted.email,
+        email: emailRes.email,
         phone: inserted.phone,
         cohort: inserted.cohort,
         status: inserted.status,
@@ -203,7 +208,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
     // while recording the student's exact contact details in admin_note and returning their clean email/phone to the UI.
     if (insertErr && (insertErr.code === "23505" || /duplicate key|unique constraint/i.test(insertErr.message))) {
       const attemptTag = generateBookingSessionToken().slice(0, 6);
-      const [localPart, domainPart] = emailRes.email.split("@");
+      const [localPart, domainPart] = storedEmail.split("@");
       const fallbackEmail = `${localPart}+${attemptTag}@${domainPart}`;
       const fallbackPhone = `${phoneRes.phone}#${attemptTag}`;
 
@@ -213,7 +218,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
           ...basePayload,
           email: fallbackEmail,
           phone: fallbackPhone,
-          admin_note: `Contact: ${emailRes.email} · ${phoneRes.phone}`,
+          admin_note: `Contact: ${emailRes.email ?? "No email"} · ${phoneRes.phone}`,
         })
         .select("*")
         .single();
@@ -287,7 +292,7 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       id: reg.id,
       booking_id: reg.booking_id,
       full_name: reg.full_name,
-      email: reg.email.replace(/\+[0-9a-f]{6}@/, "@"),
+      email: reg.email?.endsWith("@titubackpackers.internal") ? null : reg.email?.replace(/\+[0-9a-f]{6}@/, "@") ?? null,
       phone: reg.phone.replace(/#[0-9a-f]{6}$/, ""),
       cohort: reg.cohort,
       status: reg.status,

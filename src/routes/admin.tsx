@@ -195,7 +195,11 @@ function AdminPage() {
               <div>
                 <p className="text-lg font-medium">{r.full_name}</p>
                 <p className="text-sm text-muted-foreground">
-                  {r.email.replace(/\+[0-9a-f]{6}@/, "@")} · {r.phone.replace(/#[0-9a-f]{6}$/, "")}{r.cohort ? ` · ${r.cohort}` : ""}
+                  {r.email && !r.email.endsWith("@titubackpackers.internal")
+                    ? `${r.email.replace(/\+[0-9a-f]{6}@/, "@")} · `
+                    : ""}
+                  {r.phone.replace(/#[0-9a-f]{6}$/, "")}
+                  {r.cohort ? ` · ${r.cohort}` : ""}
                 </p>
                 <p className="mt-1 font-mono text-xs text-muted-foreground">{r.booking_id}</p>
               </div>

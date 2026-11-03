@@ -73,7 +73,11 @@ describe("Registration helpers", () => {
     expect(COHORT_OPTIONS).toContain("UGC 2");
   });
 
-  it("validates email format", () => {
+  it("validates optional email format allowing empty/null as valid", () => {
+    expect(validateEmail("").valid).toBe(true);
+    expect(validateEmail("").email).toBeNull();
+    expect(validateEmail(null).valid).toBe(true);
+    expect(validateEmail(null).email).toBeNull();
     expect(validateEmail("student@mesa.edu").valid).toBe(true);
     expect(validateEmail("  Student@Example.com ").email).toBe("student@example.com");
     expect(validateEmail("not-an-email").valid).toBe(false);

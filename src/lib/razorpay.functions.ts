@@ -220,7 +220,7 @@ export async function createRazorpayOrderHandler(data: {
       description: `Coorg 2026 Student Trip — Ref: ${reg.booking_id}`,
       prefill: {
         name: reg.full_name,
-        email: reg.email,
+        email: reg.email?.endsWith("@titubackpackers.internal") ? "" : reg.email ?? "",
         contact: reg.phone,
       },
       notes: {
@@ -386,7 +386,7 @@ export async function verifyRazorpayPaymentHandler(data: {
     id: updated.id,
     booking_id: updated.booking_id,
     full_name: updated.full_name,
-    email: updated.email.replace(/\+[0-9a-f]{6}@/, "@"),
+    email: updated.email?.endsWith("@titubackpackers.internal") ? null : updated.email?.replace(/\+[0-9a-f]{6}@/, "@") ?? null,
     phone: updated.phone.replace(/#[0-9a-f]{6}$/, ""),
     cohort: updated.cohort,
     status: updated.status,
