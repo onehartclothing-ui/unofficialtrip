@@ -13,10 +13,14 @@ const verifySchema = z.object({
 export const APIRoute = createAPIFileRoute("/api/verify-payment")({
   POST: async ({ request }) => {
     try {
-      const keySecret = process.env["RAZORPAY_KEY_SECRET"] || "";
+      const keySecret =
+        (typeof process !== "undefined" && process.env
+          ? process.env["RAZORPAY_KEY_SECRET"] ||
+            process.env["TITU_RAZORPAY_KEY_SECRET"]
+          : "") || "";
       if (!keySecret) {
         return json(
-          { error: "Razorpay secret not configured on server" },
+          { error: "Razorpay secret not configured on server. Please set RAZORPAY_KEY_SECRET in Vercel." },
           { status: 500 },
         );
       }
@@ -84,3 +88,4 @@ export const APIRoute = createAPIFileRoute("/api/verify-payment")({
     }
   },
 });
+

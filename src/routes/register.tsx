@@ -5,17 +5,12 @@ import { PageShell } from "@/components/site/PageShell";
 import {
   TRIP,
   COHORT_OPTIONS,
-  buildUpiLink,
-  buildIosUpiAppLinks,
-  detectDevicePlatform,
   validateEmail,
   normalizeIndianPhone,
 } from "@/lib/trip";
-import upiQr from "@/assets/upi-qr.jpg";
 import {
   createGuestRegistrationServer,
   getGuestRegistrationSessionServer,
-  submitGuestPaymentServer,
   type GuestRegistrationSession,
 } from "@/lib/registration.functions";
 import {
@@ -467,22 +462,16 @@ function PaymentStep({
   onBack: () => void;
   onStartFresh: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
-  const [showIosApps, setShowIosApps] = useState(false);
-  const [utr, setUtr] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
   const [razorpayLoading, setRazorpayLoading] = useState(false);
-  const submittingRef = useRef(false);
-
-  const iosLinks = buildIosUpiAppLinks(reg.booking_id);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   async function handleRazorpayCheckout() {
-    if (razorpayLoading || busy) return;
+    if (razorpayLoading) return;
     setRazorpayLoading(true);
+    setErrorMessage(null);
+
     try {
-      // Ensure Razorpay script is ready
+      // Ensure Razorpay Standard Checkout SDK is loaded
       const win = window as unknown as {
         Razorpay?: new (options: Record<string, unknown>) => {
           open: () => void;
@@ -491,7 +480,6 @@ function PaymentStep({
       };
 
       if (!win.Razorpay) {
-        // Load dynamically if script didn't finish loading
         await new Promise<void>((resolve, reject) => {
           const script = document.createElement("script");
           script.src = "https://checkout.razorpay.com/v1/checkout.js";
@@ -533,7 +521,7 @@ function PaymentStep({
         modal: {
           ondismiss: () => {
             setRazorpayLoading(false);
-            toast.info("Payment cancelled.");
+            toast.info("Payment window closed. You can retry whenever you are ready.");
           },
         },
         handler: async (response: {
@@ -541,9 +529,9 @@ function PaymentStep({
           razorpay_order_id: string;
           razorpay_signature: string;
         }) => {
-          setBusy(true);
+          setRazorpayLoading(true);
           try {
-            // 3. Verify signature on server
+            // 3. Verify signature securely on server
             const verified = await verifyRazorpayPaymentServer({
               data: {
                 registrationId: reg.id,
@@ -557,9 +545,10 @@ function PaymentStep({
             toast.success("Payment verified successfully!");
             onDone(verified);
           } catch (err: unknown) {
-            toast.error(errMsg(err));
+            const msg = errMsg(err);
+            setErrorMessage(msg);
+            toast.error(msg);
           } finally {
-            setBusy(false);
             setRazorpayLoading(false);
           }
         },
@@ -568,257 +557,89 @@ function PaymentStep({
       const rzp = new win.Razorpay(options);
       rzp.on("payment.failed", (resp: Record<string, unknown>) => {
         const error = (resp?.error as { description?: string })?.description || "Payment failed";
+        setErrorMessage(`Payment failed: ${error}`);
         toast.error(`Payment failed: ${error}`);
         setRazorpayLoading(false);
       });
       rzp.open();
     } catch (err: unknown) {
-      toast.error(errMsg(err));
+      const msg = errMsg(err);
+      setErrorMessage(msg);
+      toast.error(msg);
       setRazorpayLoading(false);
-    }
-  }
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(TRIP.upiId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    } catch {
-      setShowHelp(true);
-    }
-  }
-
-  function handlePayViaUpi() {
-    const platform = detectDevicePlatform();
-    if (platform === "android") {
-      // On Android, standard upi://pay opens the system chooser for Google Pay, PhonePe, Paytm, BHIM, or banking apps
-      window.location.href = buildUpiLink(reg.booking_id);
-      setTimeout(() => setShowHelp(true), 1500);
-      return;
-    }
-    if (platform === "ios") {
-      // On iPhone/iPad, generic upi:// is claimed by WhatsApp in iOS Safari.
-      // Show explicit app-specific UPI deep links (Google Pay, PhonePe, Paytm, BHIM) and fallback instructions instead.
-      setShowIosApps(true);
-      setShowHelp(true);
-      return;
-    }
-    // On desktop browsers, direct UPI URI launching is unsupported; show instructions to scan the QR or copy UPI ID
-    void copy();
-    setShowHelp(true);
-  }
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (submittingRef.current || busy) return;
-
-    const cleanedUtr = utr.replace(/\s+/g, "").toUpperCase();
-    if (!/^[A-Z0-9]{8,30}$/.test(cleanedUtr)) {
-      toast.error("Please enter a valid UPI Transaction ID / UTR (8–30 alphanumeric characters)");
-      return;
-    }
-    if (!file) {
-      toast.error("Upload your payment screenshot");
-      return;
-    }
-    if (!file.type.startsWith("image/")) {
-      toast.error("Screenshot must be an image");
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error("Screenshot must be under 5 MB");
-      return;
-    }
-
-    submittingRef.current = true;
-    setBusy(true);
-    try {
-      const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
-      const base64 = await fileToBase64(file);
-      const updated = await submitGuestPaymentServer({
-        data: {
-          registrationId: reg.id,
-          sessionToken: reg.session_token,
-          utr: cleanedUtr,
-          fileBase64: base64,
-          fileType: file.type,
-          fileExt: ext,
-        },
-      });
-      onDone(updated);
-    } catch (e) {
-      toast.error(errMsg(e));
-    } finally {
-      submittingRef.current = false;
-      setBusy(false);
     }
   }
 
   return (
     <div>
-      <p className="eyebrow text-ember">Step 2 of 2 · Payment</p>
-      {reg.status === "rejected" && (
-        <div className="mt-4 rounded-md border border-destructive p-4 text-sm">
-          Your previous payment submission needs review
-          {reg.admin_note ? `: ${reg.admin_note}` : "."} Please submit a valid UTR and payment
-          screenshot below or DM @{TRIP.instagram}.
+      <p className="eyebrow text-ember">Step 2 of 2 · Secure Payment</p>
+      
+      {errorMessage && (
+        <div className="mt-4 rounded-xl border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive-foreground">
+          {errorMessage}
         </div>
       )}
-      <h1 className="font-display mt-3 text-6xl md:text-8xl">One last thing.</h1>
+
+      {reg.status === "rejected" && (
+        <div className="mt-4 rounded-xl border border-destructive p-4 text-sm">
+          Your previous booking attempt needs review
+          {reg.admin_note ? `: ${reg.admin_note}` : "."} Please complete the payment below or DM @{TRIP.instagram}.
+        </div>
+      )}
+
+      <h1 className="font-display mt-3 text-6xl md:text-8xl">Confirm & Pay.</h1>
       <p className="mt-3 text-lg text-bone/80">
-        Pay ₹8,500 via UPI and submit your payment proof below.
+        Complete your booking with instant verification via Razorpay.
       </p>
 
       <div className="mt-8 rounded-xl border border-border bg-card p-6 md:p-8">
-        <div className="text-center">
-          <p className="eyebrow text-muted-foreground">TITU BACKPACKERS — COORG 2026</p>
-          <p className="font-display mt-2 text-5xl text-ember md:text-6xl">
-            {TRIP.priceLabel} / PERSON
-          </p>
-          <p className="eyebrow mt-6 text-bone">SCAN TO PAY</p>
-
-          <div className="mx-auto mt-4 flex h-64 w-64 items-center justify-center rounded-xl bg-white p-4 shadow-lg sm:h-72 sm:w-72">
-            <img
-              src={upiQr}
-              alt="UPI QR code for Titu Backpackers Coorg 2026 payment"
-              width={258}
-              height={295}
-              className="h-full w-full object-contain"
-            />
+        <div className="flex flex-col items-start justify-between gap-4 border-b border-border pb-6 sm:flex-row sm:items-center">
+          <div>
+            <p className="eyebrow text-muted-foreground">Booking Reference</p>
+            <p className="font-mono text-2xl font-bold tracking-wider text-bone">{reg.booking_id}</p>
           </div>
-
-          <p className="mt-4 text-sm text-bone/80">
-            Scan using any UPI app to complete your payment.
-          </p>
-
-          <a
-            href={upiQr}
-            download="titu-backpackers-coorg-2026-upi-qr.jpg"
-            className="eyebrow mt-3 inline-block text-muted-foreground underline hover:text-bone"
-          >
-            Save QR image
-          </a>
+          <div className="text-left sm:text-right">
+            <p className="eyebrow text-muted-foreground">Trip Amount</p>
+            <p className="font-display text-4xl text-ember md:text-5xl">₹8,500</p>
+          </div>
         </div>
 
-        <div className="mt-8 border-t border-border pt-6">
-          {/* Razorpay Instant Checkout */}
+        <div className="py-6">
+          <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
+            <div>
+              <p className="eyebrow text-muted-foreground">Participant</p>
+              <p className="mt-1 text-base text-bone">{reg.full_name}</p>
+            </div>
+            <div>
+              <p className="eyebrow text-muted-foreground">Cohort</p>
+              <p className="mt-1 text-base text-bone">{reg.cohort || "—"}</p>
+            </div>
+            <div>
+              <p className="eyebrow text-muted-foreground">Destination & Dates</p>
+              <p className="mt-1 text-base text-bone">Coorg · 20–22 November 2026</p>
+            </div>
+            <div>
+              <p className="eyebrow text-muted-foreground">Payment Method</p>
+              <p className="mt-1 text-base text-bone">Razorpay (UPI / Cards / Netbanking)</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-border pt-6">
           <button
             type="button"
             onClick={handleRazorpayCheckout}
-            disabled={razorpayLoading || busy}
-            className={`${primaryBtn} mb-4 flex items-center justify-center text-center shadow-lg transition-transform active:scale-[0.99]`}
+            disabled={razorpayLoading}
+            className={`${primaryBtn} flex items-center justify-center text-center shadow-lg transition-transform active:scale-[0.99]`}
           >
-            {razorpayLoading ? "PREPARING CHECKOUT…" : "PAY NOW WITH RAZORPAY (CARD / UPI / NETBANKING) →"}
+            {razorpayLoading ? "PREPARING PAYMENT…" : "PAY ₹8,500 SECURELY"}
           </button>
 
-          <div className="my-5 flex items-center gap-3">
-            <div className="h-px flex-1 bg-border" />
-            <span className="eyebrow text-xs text-muted-foreground">OR PAY DIRECT VIA UPI</span>
-            <div className="h-px flex-1 bg-border" />
-          </div>
-
-          <button
-            type="button"
-            onClick={handlePayViaUpi}
-            className="flex w-full items-center justify-center rounded-full border border-border px-6 py-3.5 font-display text-lg text-bone transition-colors hover:border-ember hover:text-ember"
-          >
-            PAY VIA UPI →
-          </button>
-
-          {showIosApps && (
-            <div className="mt-4 rounded-lg border border-border bg-ink/70 p-4">
-              <p className="eyebrow text-bone">Choose your UPI app (iPhone)</p>
-              <div className="mt-3 grid grid-cols-2 gap-2.5">
-                <a
-                  href={iosLinks.gpay}
-                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
-                >
-                  Google Pay →
-                </a>
-                <a
-                  href={iosLinks.phonepe}
-                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
-                >
-                  PhonePe →
-                </a>
-                <a
-                  href={iosLinks.paytm}
-                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
-                >
-                  Paytm →
-                </a>
-                <a
-                  href={iosLinks.bhim}
-                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
-                >
-                  BHIM →
-                </a>
-              </div>
-              <p className="mt-3 text-xs text-muted-foreground">
-                Or tap &ldquo;Save QR image&rdquo; above and use &ldquo;Scan from Gallery&rdquo; in
-                any UPI app, or copy the UPI ID below.
-              </p>
-            </div>
-          )}
-
-          <div className="mt-5 flex flex-col items-center justify-between gap-3 rounded-lg border border-border bg-ink/50 px-4 py-3 sm:flex-row">
-            <div className="text-center sm:text-left">
-              <p className="eyebrow text-muted-foreground">UPI ID · Ref: {reg.booking_id}</p>
-              <p className="mt-1 break-all font-mono text-sm text-bone md:text-base">
-                {TRIP.upiId}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={copy}
-              className="shrink-0 rounded-full border border-border px-5 py-2 font-display text-base text-bone hover:border-bone"
-            >
-              {copied ? "UPI ID copied!" : "Copy UPI ID"}
-            </button>
-          </div>
-        </div>
-
-        {showHelp && (
-          <p className="mt-4 text-sm text-muted-foreground">
-            To pay manually: scan the QR code above (or save it and scan from your gallery), or open
-            Google Pay, PhonePe, Paytm, or your banking app → Pay to UPI ID → paste{" "}
-            <span className="font-mono text-bone">{TRIP.upiId}</span> → enter ₹8,500 → description{" "}
-            <span className="font-mono text-bone">Titu Backpackers Coorg Trip</span>. Opening an app
-            does not confirm payment.
+          <p className="mt-4 text-center text-xs text-muted-foreground">
+            🔒 256-bit encrypted checkout powered by Razorpay. Supports all UPI apps (GPay, PhonePe, Paytm), debit/credit cards, and netbanking.
           </p>
-        )}
+        </div>
       </div>
-
-      <form onSubmit={submit} className="mt-10 space-y-5">
-        <p className="eyebrow">After paying, submit your payment proof</p>
-        <label className="block">
-          <span className="eyebrow mb-2 block text-muted-foreground">
-            UPI Transaction ID / UTR
-          </span>
-          <input
-            className={input}
-            required
-            value={utr}
-            onChange={(e) => setUtr(e.target.value.replace(/\s/g, ""))}
-            pattern="[A-Za-z0-9]{8,30}"
-            maxLength={30}
-            placeholder="e.g. 431298765432"
-          />
-        </label>
-        <label className="block">
-          <span className="eyebrow mb-2 block text-muted-foreground">Payment screenshot</span>
-          <input
-            type="file"
-            accept="image/*"
-            required
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            className="block w-full text-sm text-muted-foreground file:mr-4 file:rounded-full file:border-0 file:bg-pine file:px-4 file:py-2.5 file:text-bone"
-          />
-        </label>
-        <button type="submit" disabled={busy} className={primaryBtn}>
-          {busy ? "Uploading…" : "I'VE PAID ₹8,500 →"}
-        </button>
-      </form>
 
       <div className="mt-8 flex flex-wrap items-center justify-between gap-4">
         <button

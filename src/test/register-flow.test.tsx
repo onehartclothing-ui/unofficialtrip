@@ -10,6 +10,8 @@ import {
 const mockCreateGuestRegistrationServer = vi.fn();
 const mockGetGuestRegistrationSessionServer = vi.fn();
 const mockSubmitGuestPaymentServer = vi.fn();
+const mockCreateRazorpayOrderServer = vi.fn();
+const mockVerifyRazorpayPaymentServer = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (opts: { component: React.ComponentType }) => opts,
@@ -29,6 +31,11 @@ vi.mock("@/lib/registration.functions", async (importOriginal) => {
     submitGuestPaymentServer: (...args: unknown[]) => mockSubmitGuestPaymentServer(...args),
   };
 });
+
+vi.mock("@/lib/razorpay.functions", () => ({
+  createRazorpayOrderServer: (...args: unknown[]) => mockCreateRazorpayOrderServer(...args),
+  verifyRazorpayPaymentServer: (...args: unknown[]) => mockVerifyRazorpayPaymentServer(...args),
+}));
 
 import { Route as RegisterRoute } from "@/routes/register";
 
@@ -128,7 +135,7 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.click(continueBtn);
 
     await waitFor(() => {
-      expect(screen.getByText("gatepay.nkgsbank725538@icici")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
 
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledWith({
@@ -142,50 +149,88 @@ describe("Guest registration & payment flow (/register)", () => {
       },
     });
 
-    // 6. Verify payment page displays ₹8,500, QR code, UPI ID, PAY VIA UPI button, Save QR image, and Copy button
-    expect(screen.getByText("TITU BACKPACKERS — COORG 2026")).toBeInTheDocument();
-    expect(screen.getByText("₹8,500 / PERSON")).toBeInTheDocument();
-    expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
-    expect(screen.getByText("Scan using any UPI app to complete your payment.")).toBeInTheDocument();
-    expect(screen.getByAltText("UPI QR code for Titu Backpackers Coorg 2026 payment")).toBeInTheDocument();
-    expect(screen.getByText("gatepay.nkgsbank725538@icici")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copy UPI ID" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "PAY VIA UPI →" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Save QR image" })).toBeInTheDocument();
-
-    // 7. Submit UTR and screenshot -> calls secure server function with booking session token
-    const utrInput = screen.getByPlaceholderText("e.g. 431298765432");
-    fireEvent.change(utrInput, { target: { value: "431298765432" } });
-
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
-    const testFile = new File(["dummy-image-bytes"], "payment.png", { type: "image/png" });
-    Object.defineProperty(fileInput, "files", { value: [testFile], configurable: true });
-    fireEvent.change(fileInput);
-
-    const paymentForm = fileInput.closest("form")!;
-    fireEvent.submit(paymentForm);
-
-    // 8. Verify Pending Verification confirmation screen
-    await waitFor(() => {
-      expect(screen.getByText("YOU'RE ALMOST IN!")).toBeInTheDocument();
-    });
-
-    expect(mockSubmitGuestPaymentServer).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        registrationId: fakeSession.id,
-        sessionToken: sessionToken,
-        utr: "431298765432",
-        fileType: "image/png",
-        fileExt: "png",
-      }),
-    });
-
-    expect(
-      screen.getByText("Your payment details have been submitted and are awaiting verification."),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Pending verification")).toBeInTheDocument();
+    // 6. Verify payment page displays Booking Reference, ₹8,500, and PAY ₹8,500 SECURELY button
+    expect(screen.getByText("Step 2 of 2 · Secure Payment")).toBeInTheDocument();
+    expect(screen.getByText("Confirm & Pay.")).toBeInTheDocument();
     expect(screen.getByText("TB-COORG-TEST99")).toBeInTheDocument();
-    expect(screen.getByText("431298765432")).toBeInTheDocument();
+    expect(screen.getByText("₹8,500")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
+    expect(screen.getByText(/256-bit encrypted checkout powered by Razorpay/i)).toBeInTheDocument();
+
+    // Verify OLD manual UPI & QR components are completely removed
+    expect(screen.queryByText("SCAN TO PAY")).toBeNull();
+    expect(screen.queryByAltText("UPI QR code for Titu Backpackers Coorg 2026 payment")).toBeNull();
+    expect(screen.queryByText("gatepay.nkgsbank725538@icici")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy UPI ID" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "PAY VIA UPI →" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Save QR image" })).toBeNull();
+    expect(screen.queryByPlaceholderText("e.g. 431298765432")).toBeNull();
+
+    // 7. Click PAY ₹8,500 SECURELY -> opens Razorpay checkout and completes payment
+    const win = window as unknown as {
+      Razorpay?: unknown;
+    };
+
+    let checkoutHandler: ((res: { razorpay_payment_id: string; razorpay_order_id: string; razorpay_signature: string }) => void) | null = null;
+    class MockRazorpayClient {
+      constructor(options: { handler: typeof checkoutHandler }) {
+        checkoutHandler = options.handler;
+      }
+      open = vi.fn();
+      on = vi.fn();
+    }
+    win.Razorpay = MockRazorpayClient;
+
+    mockCreateRazorpayOrderServer.mockResolvedValue({
+      order_id: "order_test_123",
+      amount: 850000,
+      currency: "INR",
+      key_id: "rzp_test_TvmDWL1SNFJlcZ",
+      name: "Titu Backpackers",
+      description: "Coorg 2026 Student Trip",
+      prefill: {
+        name: "Aarav Sharma",
+        email: "aarav@mesabusinessschool.org",
+        contact: "+919876543210",
+      },
+      notes: {},
+    });
+
+    mockVerifyRazorpayPaymentServer.mockResolvedValue({
+      ...fakeSession,
+      status: "confirmed",
+      utr: "pay_test_999",
+      session_token: rotatedToken,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" }));
+
+    await waitFor(() => {
+      expect(mockCreateRazorpayOrderServer).toHaveBeenCalledWith({
+        data: {
+          registrationId: fakeSession.id,
+          sessionToken: sessionToken,
+        },
+      });
+    });
+
+    // Simulate successful payment callback from Razorpay
+    if (checkoutHandler) {
+      await (checkoutHandler as any)({
+        razorpay_payment_id: "pay_test_999",
+        razorpay_order_id: "order_test_123",
+        razorpay_signature: "valid_mock_signature",
+      });
+    }
+
+    // 8. Verify Payment Verified / Confirmed screen
+    await waitFor(() => {
+      expect(screen.getByText("You're officially going to Coorg!")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Payment verified ✓")).toBeInTheDocument();
+    expect(screen.getByText("TB-COORG-TEST99")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download confirmation" })).toBeInTheDocument();
   });
 
   it("allows unlimited registrations using the same email and phone number without OTP or 'Email already registered' errors", async () => {
@@ -245,7 +290,7 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
 
     await waitFor(() => {
-      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
     expect(screen.getByText(/TB-COORG-ATTMP1/)).toBeInTheDocument();
 
@@ -276,7 +321,7 @@ describe("Guest registration & payment flow (/register)", () => {
 
     // Proceeds directly to payment with new booking reference TB-COORG-ATTMP2 and zero OTP or "Email already registered" errors
     await waitFor(() => {
-      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
     expect(screen.getByText(/TB-COORG-ATTMP2/)).toBeInTheDocument();
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(2);
@@ -342,7 +387,7 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.click(continueBtn);
 
     await waitFor(() => {
-      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(1);
 
@@ -354,7 +399,7 @@ describe("Guest registration & payment flow (/register)", () => {
     // Go back to payment without changing details -> reuses same pending registration without extra server call
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
     await waitFor(() => {
-      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(1);
 
@@ -364,7 +409,7 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
 
     await waitFor(() => {
-      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(2);
     expect(mockCreateGuestRegistrationServer).toHaveBeenLastCalledWith({
@@ -384,7 +429,7 @@ describe("Guest registration & payment flow (/register)", () => {
     render(<RegisterComponent />);
 
     await waitFor(() => {
-      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
     });
     expect(screen.getByText(/TB-COORG-MULTI1/)).toBeInTheDocument();
     expect(mockGetGuestRegistrationSessionServer).toHaveBeenCalledWith({
@@ -395,7 +440,7 @@ describe("Guest registration & payment flow (/register)", () => {
     });
   });
 
-  it("handles PAY VIA UPI on iPhone Safari without triggering generic upi:// (preventing WhatsApp popup)", async () => {
+  it("displays Razorpay as the ONLY payment method with PAY ₹8,500 SECURELY button and no UPI QR/UTR inputs", async () => {
     const token = "d".repeat(64);
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
@@ -414,59 +459,36 @@ describe("Guest registration & payment flow (/register)", () => {
 
     mockCreateGuestRegistrationServer.mockResolvedValue(session);
 
-    const origUA = navigator.userAgent;
-    Object.defineProperty(window.navigator, "userAgent", {
-      value:
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-      configurable: true,
+    render(<RegisterComponent />);
+
+    fireEvent.change(screen.getByPlaceholderText("Your full name"), {
+      target: { value: "Kabir Verma" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("you@mesabusinessschool.org"), {
+      target: { value: "kabir@mesabusinessschool.org" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("+91 98765 43210"), {
+      target: { value: "+91 98765 43212" },
+    });
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "UGC 1" },
     });
 
-    try {
-      render(<RegisterComponent />);
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]!);
+    fireEvent.click(checkboxes[1]!);
+    fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
 
-      fireEvent.change(screen.getByPlaceholderText("Your full name"), {
-        target: { value: "Kabir Verma" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("you@mesabusinessschool.org"), {
-        target: { value: "kabir@mesabusinessschool.org" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("+91 98765 43210"), {
-        target: { value: "+91 98765 43212" },
-      });
-      fireEvent.change(screen.getByRole("combobox"), {
-        target: { value: "UGC 1" },
-      });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "PAY ₹8,500 SECURELY" })).toBeInTheDocument();
+    });
 
-      const checkboxes = screen.getAllByRole("checkbox");
-      fireEvent.click(checkboxes[0]!);
-      fireEvent.click(checkboxes[1]!);
-      fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
-
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "PAY VIA UPI →" })).toBeInTheDocument();
-      });
-
-      fireEvent.click(screen.getByRole("button", { name: "PAY VIA UPI →" }));
-
-      // Verify iOS UPI app chooser appears with valid app-specific deep links and no WhatsApp or generic upi:// link
-      expect(screen.getByText("Choose your UPI app (iPhone)")).toBeInTheDocument();
-      const gpayLink = screen.getByRole("link", { name: "Google Pay →" });
-      const phonepeLink = screen.getByRole("link", { name: "PhonePe →" });
-      const paytmLink = screen.getByRole("link", { name: "Paytm →" });
-      const bhimLink = screen.getByRole("link", { name: "BHIM →" });
-
-      expect(gpayLink.getAttribute("href")).toMatch(/^tez:\/\/upi\/pay\?/);
-      expect(phonepeLink.getAttribute("href")).toMatch(/^phonepe:\/\/pay\?/);
-      expect(paytmLink.getAttribute("href")).toMatch(/^paytmmp:\/\/pay\?/);
-      expect(bhimLink.getAttribute("href")).toMatch(/^bhim:\/\/pay\?/);
-
-      // Clear fallback instructions are displayed
-      expect(screen.getByText(/Opening an app does not confirm payment/i)).toBeInTheDocument();
-    } finally {
-      Object.defineProperty(window.navigator, "userAgent", {
-        value: origUA,
-        configurable: true,
-      });
-    }
+    // Ensure all legacy UPI items are NOT rendered
+    expect(screen.queryByText("PAY VIA UPI →")).toBeNull();
+    expect(screen.queryByText("Save QR image")).toBeNull();
+    expect(screen.queryByText("Copy UPI ID")).toBeNull();
+    expect(screen.queryByText("SCAN TO PAY")).toBeNull();
+    expect(screen.queryByPlaceholderText("e.g. 431298765432")).toBeNull();
+    expect(document.querySelector('input[type="file"]')).toBeNull();
   });
 });

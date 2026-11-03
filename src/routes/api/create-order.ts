@@ -15,14 +15,20 @@ export const APIRoute = createAPIFileRoute("/api/create-order")({
   POST: async ({ request }) => {
     try {
       const keyId =
-        process.env["RAZORPAY_KEY_ID"] ||
-        process.env["VITE_RAZORPAY_KEY_ID"] ||
-        "";
-      const keySecret = process.env["RAZORPAY_KEY_SECRET"] || "";
+        (typeof process !== "undefined" && process.env
+          ? process.env["RAZORPAY_KEY_ID"] ||
+            process.env["VITE_RAZORPAY_KEY_ID"] ||
+            process.env["TITU_RAZORPAY_KEY_ID"]
+          : "") || "";
+      const keySecret =
+        (typeof process !== "undefined" && process.env
+          ? process.env["RAZORPAY_KEY_SECRET"] ||
+            process.env["TITU_RAZORPAY_KEY_SECRET"]
+          : "") || "";
 
       if (!keyId || !keySecret) {
         return json(
-          { error: "Razorpay credentials not configured on server" },
+          { error: "Razorpay credentials not configured on server. Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Vercel." },
           { status: 401 },
         );
       }
@@ -70,3 +76,4 @@ export const APIRoute = createAPIFileRoute("/api/create-order")({
     }
   },
 });
+

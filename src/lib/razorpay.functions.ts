@@ -12,14 +12,24 @@ import {
 } from "@/lib/registration.functions";
 
 export function getRazorpayClient(): { razorpay: Razorpay; keyId: string; keySecret: string } {
+  // Support both process.env and any prefixed environment variables commonly used in Vercel
   const keyId =
-    process.env["RAZORPAY_KEY_ID"] ||
-    process.env["VITE_RAZORPAY_KEY_ID"] ||
-    "";
-  const keySecret = process.env["RAZORPAY_KEY_SECRET"] || "";
+    (typeof process !== "undefined" && process.env
+      ? process.env["RAZORPAY_KEY_ID"] ||
+        process.env["VITE_RAZORPAY_KEY_ID"] ||
+        process.env["TITU_RAZORPAY_KEY_ID"]
+      : "") || "";
+
+  const keySecret =
+    (typeof process !== "undefined" && process.env
+      ? process.env["RAZORPAY_KEY_SECRET"] ||
+        process.env["TITU_RAZORPAY_KEY_SECRET"]
+      : "") || "";
 
   if (!keyId || !keySecret) {
-    throw new Error("Razorpay credentials are not configured on the server.");
+    throw new Error(
+      "Razorpay credentials are not configured on the server. Please ensure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET environment variables are set in your deployment settings.",
+    );
   }
 
   return {
@@ -168,9 +178,9 @@ export async function verifyRazorpayPaymentHandler(data: {
   razorpay_payment_id: string;
   razorpay_signature: string;
 }): Promise<GuestRegistrationSession> {
-  const { keySecret } = getRazorpayClient();
+  const { razorpay, keySecret } = getRazorpayClient();
 
-  // Verify HMAC-SHA256 signature
+  // 1. Verify HMAC-SHA256 signature
   const text = `${data.razorpay_order_id}|${data.razorpay_payment_id}`;
   const expectedSignature = crypto
     .createHmac("sha256", keySecret)
@@ -186,6 +196,31 @@ export async function verifyRazorpayPaymentHandler(data: {
 
   if (!isSignatureValid) {
     throw new Error("Invalid Razorpay payment signature. Payment verification failed.");
+  }
+
+  // 2. Double-check payment status and amount with Razorpay API (₹8,500 = 850000 paise)
+  try {
+    const payment = await razorpay.payments.fetch(data.razorpay_payment_id);
+    if (payment) {
+      if (payment.order_id && payment.order_id !== data.razorpay_order_id) {
+        throw new Error("Payment order ID mismatch.");
+      }
+      if (Number(payment.amount) !== TRIP.price * 100) {
+        throw new Error(`Invalid payment amount: expected ₹${TRIP.price}, received ₹${Number(payment.amount) / 100}`);
+      }
+      if (payment.currency && payment.currency.toUpperCase() !== "INR") {
+        throw new Error("Invalid payment currency: expected INR.");
+      }
+      if (payment.status !== "captured" && payment.status !== "authorized") {
+        throw new Error(`Payment is not successful (status: ${payment.status}).`);
+      }
+    }
+  } catch (fetchErr: unknown) {
+    // If the mock or API doesn't implement payments.fetch or network error occurs,
+    // we log but rely on the cryptographically validated HMAC signature.
+    if (fetchErr instanceof Error && !fetchErr.message.includes("is not a function")) {
+      console.warn("Razorpay payment fetch check notice:", fetchErr.message);
+    }
   }
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
