@@ -145,7 +145,7 @@ describe("Guest registration & payment flow (/register)", () => {
     expect(screen.getByAltText("UPI QR code for Titu Backpackers Coorg 2026 payment")).toBeInTheDocument();
     expect(screen.getByText("gatepay.nkgsbank725538@icici")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy UPI ID" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "PAY VIA UPI →" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "PAY VIA UPI →" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Save QR image" })).toBeInTheDocument();
 
     // 7. Submit UTR and screenshot -> calls secure server function with booking session token
@@ -294,5 +294,80 @@ describe("Guest registration & payment flow (/register)", () => {
         sessionToken: token2,
       },
     });
+  });
+
+  it("handles PAY VIA UPI on iPhone Safari without triggering generic upi:// (preventing WhatsApp popup)", async () => {
+    const token = "d".repeat(64);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    const session = {
+      id: "11111111-1111-4111-8111-111111111111",
+      booking_id: "TB-COORG-IOS123",
+      full_name: "Kabir Verma",
+      email: "kabir@mesabusinessschool.org",
+      phone: "+919876543212",
+      cohort: "UGC 1",
+      status: "registration_started",
+      utr: null,
+      session_token: token,
+      session_expires_at: expiresAt,
+    };
+
+    mockCreateGuestRegistrationServer.mockResolvedValue(session);
+
+    const origUA = navigator.userAgent;
+    Object.defineProperty(window.navigator, "userAgent", {
+      value:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+      configurable: true,
+    });
+
+    try {
+      render(<RegisterComponent />);
+
+      fireEvent.change(screen.getByPlaceholderText("Your full name"), {
+        target: { value: "Kabir Verma" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("you@mesabusinessschool.org"), {
+        target: { value: "kabir@mesabusinessschool.org" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("+91 98765 43210"), {
+        target: { value: "+91 98765 43212" },
+      });
+      fireEvent.change(screen.getByRole("combobox"), {
+        target: { value: "UGC 1" },
+      });
+
+      const checkboxes = screen.getAllByRole("checkbox");
+      fireEvent.click(checkboxes[0]!);
+      fireEvent.click(checkboxes[1]!);
+      fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "PAY VIA UPI →" })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "PAY VIA UPI →" }));
+
+      // Verify iOS UPI app chooser appears with valid app-specific deep links and no WhatsApp or generic upi:// link
+      expect(screen.getByText("Choose your UPI app (iPhone)")).toBeInTheDocument();
+      const gpayLink = screen.getByRole("link", { name: "Google Pay →" });
+      const phonepeLink = screen.getByRole("link", { name: "PhonePe →" });
+      const paytmLink = screen.getByRole("link", { name: "Paytm →" });
+      const bhimLink = screen.getByRole("link", { name: "BHIM →" });
+
+      expect(gpayLink.getAttribute("href")).toMatch(/^tez:\/\/upi\/pay\?/);
+      expect(phonepeLink.getAttribute("href")).toMatch(/^phonepe:\/\/pay\?/);
+      expect(paytmLink.getAttribute("href")).toMatch(/^paytmmp:\/\/pay\?/);
+      expect(bhimLink.getAttribute("href")).toMatch(/^bhim:\/\/pay\?/);
+
+      // Clear fallback instructions are displayed
+      expect(screen.getByText(/Opening an app does not confirm payment/i)).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window.navigator, "userAgent", {
+        value: origUA,
+        configurable: true,
+      });
+    }
   });
 });

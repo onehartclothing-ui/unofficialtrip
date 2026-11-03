@@ -2,7 +2,15 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { PageShell } from "@/components/site/PageShell";
-import { TRIP, COHORT_OPTIONS, buildUpiLink, validateEmail, normalizeIndianPhone } from "@/lib/trip";
+import {
+  TRIP,
+  COHORT_OPTIONS,
+  buildUpiLink,
+  buildIosUpiAppLinks,
+  detectDevicePlatform,
+  validateEmail,
+  normalizeIndianPhone,
+} from "@/lib/trip";
 import upiQr from "@/assets/upi-qr.jpg";
 import {
   createGuestRegistrationServer,
@@ -441,10 +449,13 @@ function PaymentStep({
 }) {
   const [copied, setCopied] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showIosApps, setShowIosApps] = useState(false);
   const [utr, setUtr] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const submittingRef = useRef(false);
+
+  const iosLinks = buildIosUpiAppLinks(reg.booking_id);
 
   async function copy() {
     try {
@@ -454,6 +465,26 @@ function PaymentStep({
     } catch {
       setShowHelp(true);
     }
+  }
+
+  function handlePayViaUpi() {
+    const platform = detectDevicePlatform();
+    if (platform === "android") {
+      // On Android, standard upi://pay opens the system chooser for Google Pay, PhonePe, Paytm, BHIM, or banking apps
+      window.location.href = buildUpiLink(reg.booking_id);
+      setTimeout(() => setShowHelp(true), 1500);
+      return;
+    }
+    if (platform === "ios") {
+      // On iPhone/iPad, generic upi:// is claimed by WhatsApp in iOS Safari.
+      // Show explicit app-specific UPI deep links (Google Pay, PhonePe, Paytm, BHIM) and fallback instructions instead.
+      setShowIosApps(true);
+      setShowHelp(true);
+      return;
+    }
+    // On desktop browsers, direct UPI URI launching is unsupported; show instructions to scan the QR or copy UPI ID
+    void copy();
+    setShowHelp(true);
   }
 
   async function submit(e: React.FormEvent) {
@@ -538,13 +569,48 @@ function PaymentStep({
         </div>
 
         <div className="mt-8 border-t border-border pt-6">
-          <a
-            href={buildUpiLink(reg.booking_id)}
-            onClick={() => setTimeout(() => setShowHelp(true), 1500)}
+          <button
+            type="button"
+            onClick={handlePayViaUpi}
             className={`${primaryBtn} flex items-center justify-center text-center`}
           >
             PAY VIA UPI →
-          </a>
+          </button>
+
+          {showIosApps && (
+            <div className="mt-4 rounded-lg border border-border bg-ink/70 p-4">
+              <p className="eyebrow text-bone">Choose your UPI app (iPhone)</p>
+              <div className="mt-3 grid grid-cols-2 gap-2.5">
+                <a
+                  href={iosLinks.gpay}
+                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
+                >
+                  Google Pay →
+                </a>
+                <a
+                  href={iosLinks.phonepe}
+                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
+                >
+                  PhonePe →
+                </a>
+                <a
+                  href={iosLinks.paytm}
+                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
+                >
+                  Paytm →
+                </a>
+                <a
+                  href={iosLinks.bhim}
+                  className="rounded-full border border-border px-4 py-2.5 text-center font-display text-sm text-bone hover:border-ember"
+                >
+                  BHIM →
+                </a>
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Or tap &ldquo;Save QR image&rdquo; above and use &ldquo;Scan from Gallery&rdquo; in any UPI app, or copy the UPI ID below.
+              </p>
+            </div>
+          )}
 
           <div className="mt-5 flex flex-col items-center justify-between gap-3 rounded-lg border border-border bg-ink/50 px-4 py-3 sm:flex-row">
             <div className="text-center sm:text-left">
@@ -563,9 +629,9 @@ function PaymentStep({
 
         {showHelp && (
           <p className="mt-4 text-sm text-muted-foreground">
-            If no app opened: scan the QR code above or open GPay, PhonePe, Paytm or your bank app → Pay to UPI ID → paste{" "}
-            <span className="font-mono text-bone">{TRIP.upiId}</span> → enter ₹8,500 → add{" "}
-            {reg.booking_id} as the note. Opening an app does not confirm payment.
+            To pay manually: scan the QR code above (or save it and scan from your gallery), or open Google Pay, PhonePe, Paytm, or your banking app → Pay to UPI ID → paste{" "}
+            <span className="font-mono text-bone">{TRIP.upiId}</span> → enter ₹8,500 → description{" "}
+            <span className="font-mono text-bone">Titu Backpackers Coorg Trip</span>. Opening an app does not confirm payment.
           </p>
         )}
       </div>

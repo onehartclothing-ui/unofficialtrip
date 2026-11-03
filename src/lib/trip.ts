@@ -53,15 +53,55 @@ export function normalizeIndianPhone(raw: string): { valid: boolean; phone: stri
   return { valid: true, phone: `+91${match[1]}` };
 }
 
-/** Standard UPI deep link. No payee name is invented. */
-export function buildUpiLink(reference: string) {
-  const params = new URLSearchParams({
-    pa: TRIP.upiId,
-    am: String(TRIP.price),
-    cu: "INR",
-    tn: `COORG2026 ${reference}`.slice(0, 50),
-  });
-  return `upi://pay?${params.toString()}`;
+/**
+ * Properly encodes all UPI URI parameters using standard percent-encoding (%20 for spaces).
+ */
+export function buildUpiQueryParams(reference?: string): string {
+  const note = reference
+    ? `Titu Backpackers Coorg Trip ${reference}`.slice(0, 50)
+    : "Titu Backpackers Coorg Trip";
+  const entries: [string, string][] = [
+    ["pa", TRIP.upiId],
+    ["am", String(TRIP.price)],
+    ["cu", "INR"],
+    ["tn", note],
+  ];
+  return entries.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+}
+
+/**
+ * Standard UPI deep link (used on Android to open the system UPI chooser for GPay, PhonePe, Paytm, or bank apps).
+ * Note: On iOS, the generic `upi://` scheme is claimed by WhatsApp in Info.plist (`LSApplicationQueriesSchemes`/`CFBundleURLSchemes`),
+ * so iOS Safari must NOT navigate to `upi://pay` directly.
+ */
+export function buildUpiLink(reference?: string) {
+  return `upi://pay?${buildUpiQueryParams(reference)}`;
+}
+
+/**
+ * App-specific iOS UPI deep links for major Indian UPI apps (never includes WhatsApp).
+ */
+export function buildIosUpiAppLinks(reference?: string) {
+  const query = buildUpiQueryParams(reference);
+  return {
+    gpay: `tez://upi/pay?${query}`,
+    phonepe: `phonepe://pay?${query}`,
+    paytm: `paytmmp://pay?${query}`,
+    bhim: `bhim://pay?${query}`,
+  } as const;
+}
+
+export type DevicePlatform = "ios" | "android" | "desktop";
+
+export function detectDevicePlatform(
+  userAgent: string = typeof navigator !== "undefined" ? navigator.userAgent : "",
+  maxTouchPoints: number = typeof navigator !== "undefined" ? navigator.maxTouchPoints ?? 0 : 0,
+): DevicePlatform {
+  if (/android/i.test(userAgent)) return "android";
+  if (/iPad|iPhone|iPod/i.test(userAgent) || (/Macintosh/i.test(userAgent) && maxTouchPoints > 1)) {
+    return "ios";
+  }
+  return "desktop";
 }
 
 export const STATUS_LABEL: Record<string, string> = {
