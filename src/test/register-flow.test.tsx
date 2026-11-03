@@ -132,12 +132,16 @@ describe("Guest registration & payment flow (/register)", () => {
       },
     });
 
-    // 6. Verify payment page displays ₹8,500, UPI ID, Copy button, Pay via UPI App, and no QR code
-    expect(screen.getByText("₹8,500")).toBeInTheDocument();
+    // 6. Verify payment page displays ₹8,500, QR code, UPI ID, PAY VIA UPI button, Save QR image, and Copy button
+    expect(screen.getByText("TITU BACKPACKERS — COORG 2026")).toBeInTheDocument();
+    expect(screen.getByText("₹8,500 / PERSON")).toBeInTheDocument();
+    expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+    expect(screen.getByText("Scan using any UPI app to complete your payment.")).toBeInTheDocument();
+    expect(screen.getByAltText("UPI QR code for Titu Backpackers Coorg 2026 payment")).toBeInTheDocument();
     expect(screen.getByText("gatepay.nkgsbank725538@icici")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy UPI ID" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Pay via UPI App" })).toBeInTheDocument();
-    expect(screen.queryByAltText(/qr/i)).toBeNull();
+    expect(screen.getByRole("link", { name: "PAY VIA UPI →" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Save QR image" })).toBeInTheDocument();
 
     // 7. Submit UTR and screenshot -> calls secure server function with booking session token
     const utrInput = screen.getByPlaceholderText("e.g. 431298765432");

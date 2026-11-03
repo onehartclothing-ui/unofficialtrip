@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { PageShell } from "@/components/site/PageShell";
 import { TRIP, COHORT_OPTIONS, buildUpiLink, validateEmail, normalizeIndianPhone } from "@/lib/trip";
+import upiQr from "@/assets/upi-qr.jpg";
 import {
   createGuestRegistrationServer,
   submitGuestPaymentServer,
@@ -378,33 +379,61 @@ function PaymentStep({
       <p className="mt-3 text-lg text-bone/80">Pay ₹8,500 via UPI and submit your payment proof below.</p>
 
       <div className="mt-8 rounded-xl border border-border bg-card p-6 md:p-8">
-        <p className="eyebrow text-muted-foreground">Total amount</p>
-        <p className="font-display mt-2 text-6xl">{TRIP.priceLabel}</p>
+        <div className="text-center">
+          <p className="eyebrow text-muted-foreground">TITU BACKPACKERS — COORG 2026</p>
+          <p className="font-display mt-2 text-5xl text-ember md:text-6xl">{TRIP.priceLabel} / PERSON</p>
+          <p className="eyebrow mt-6 text-bone">SCAN TO PAY</p>
 
-        <p className="eyebrow mt-8 text-muted-foreground">UPI ID</p>
-        <p className="mt-2 break-all font-mono text-lg md:text-xl">{TRIP.upiId}</p>
-        <p className="mt-2 text-xs text-muted-foreground">Reference: {reg.booking_id}</p>
+          <div className="mx-auto mt-4 flex h-64 w-64 items-center justify-center rounded-xl bg-white p-4 shadow-lg sm:h-72 sm:w-72">
+            <img
+              src={upiQr}
+              alt="UPI QR code for Titu Backpackers Coorg 2026 payment"
+              width={258}
+              height={295}
+              className="h-full w-full object-contain"
+            />
+          </div>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
-          <button
-            type="button"
-            onClick={copy}
-            className={copied ? `${primaryBtn} bg-bone` : primaryBtn}
+          <p className="mt-4 text-sm text-bone/80">
+            Scan using any UPI app to complete your payment.
+          </p>
+
+          <a
+            href={upiQr}
+            download="titu-backpackers-coorg-2026-upi-qr.jpg"
+            className="eyebrow mt-3 inline-block text-muted-foreground underline hover:text-bone"
           >
-            {copied ? "UPI ID copied!" : "Copy UPI ID"}
-          </button>
+            Save QR image
+          </a>
+        </div>
+
+        <div className="mt-8 border-t border-border pt-6">
           <a
             href={buildUpiLink(reg.booking_id)}
             onClick={() => setTimeout(() => setShowHelp(true), 1500)}
-            className={`${ghostBtn} flex items-center justify-center text-center`}
+            className={`${primaryBtn} flex items-center justify-center text-center`}
           >
-            Pay via UPI App
+            PAY VIA UPI →
           </a>
+
+          <div className="mt-5 flex flex-col items-center justify-between gap-3 rounded-lg border border-border bg-ink/50 px-4 py-3 sm:flex-row">
+            <div className="text-center sm:text-left">
+              <p className="eyebrow text-muted-foreground">UPI ID · Ref: {reg.booking_id}</p>
+              <p className="mt-1 break-all font-mono text-sm text-bone md:text-base">{TRIP.upiId}</p>
+            </div>
+            <button
+              type="button"
+              onClick={copy}
+              className="shrink-0 rounded-full border border-border px-5 py-2 font-display text-base text-bone hover:border-bone"
+            >
+              {copied ? "UPI ID copied!" : "Copy UPI ID"}
+            </button>
+          </div>
         </div>
 
         {showHelp && (
           <p className="mt-4 text-sm text-muted-foreground">
-            If no app opened: open GPay, PhonePe, Paytm or your bank app → Pay to UPI ID → paste{" "}
+            If no app opened: scan the QR code above or open GPay, PhonePe, Paytm or your bank app → Pay to UPI ID → paste{" "}
             <span className="font-mono text-bone">{TRIP.upiId}</span> → enter ₹8,500 → add{" "}
             {reg.booking_id} as the note. Opening an app does not confirm payment.
           </p>
