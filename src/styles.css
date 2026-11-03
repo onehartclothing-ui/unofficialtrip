@@ -1,0 +1,131 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-display: "Anton", "Impact", sans-serif;
+  --font-sans: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-pine: var(--pine);
+  --color-mist: var(--mist);
+  --color-ember: var(--ember);
+  --color-amber: var(--amber);
+  --color-ink: var(--ink);
+  --color-bone: var(--bone);
+}
+
+:root {
+  --radius: 0.25rem;
+  --ink: oklch(0.15 0.005 160);       /* #0B0D0C */
+  --bone: oklch(0.95 0.012 85);       /* #F4F0E8 */
+  --pine: oklch(0.25 0.02 165);       /* #17241F */
+  --mist: oklch(0.79 0.012 150);      /* #B9C0BA */
+  --ember: oklch(0.66 0.17 45);       /* #E86B35 */
+  --amber: oklch(0.68 0.1 65);        /* #C58A52 */
+
+  --background: var(--ink);
+  --foreground: var(--bone);
+  --card: oklch(0.19 0.01 160);
+  --card-foreground: var(--bone);
+  --popover: oklch(0.19 0.01 160);
+  --popover-foreground: var(--bone);
+  --primary: var(--ember);
+  --primary-foreground: var(--ink);
+  --secondary: var(--pine);
+  --secondary-foreground: var(--bone);
+  --muted: oklch(0.22 0.01 160);
+  --muted-foreground: oklch(0.72 0.012 150);
+  --accent: var(--pine);
+  --accent-foreground: var(--bone);
+  --destructive: oklch(0.6 0.2 27);
+  --destructive-foreground: var(--bone);
+  --border: oklch(0.95 0.012 85 / 14%);
+  --input: oklch(0.95 0.012 85 / 22%);
+  --ring: var(--ember);
+
+  --gradient-veil: linear-gradient(180deg, oklch(0.15 0.005 160 / 0.55) 0%, transparent 35%, transparent 60%, oklch(0.15 0.005 160 / 0.95) 100%);
+  --gradient-amber: radial-gradient(ellipse at 50% 70%, oklch(0.68 0.1 65 / 0.35), transparent 65%);
+}
+
+@layer base {
+  * { border-color: var(--color-border); }
+  html { scroll-behavior: smooth; }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--ember); color: var(--ink); }
+}
+
+@utility font-display { font-family: var(--font-display); letter-spacing: -0.01em; line-height: 0.88; text-transform: uppercase; }
+@utility eyebrow { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.32em; text-transform: uppercase; }
+@utility veil { background: var(--gradient-veil); }
+@utility amber-glow { background: var(--gradient-amber); }
+
+@utility grain {
+  &::after {
+    content: "";
+    position: fixed;
+    inset: -50%;
+    pointer-events: none;
+    z-index: 60;
+    opacity: 0.07;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    animation: grain 1.2s steps(6) infinite;
+  }
+}
+
+@utility fog {
+  background: radial-gradient(ellipse 60% 40% at 30% 60%, oklch(0.79 0.012 150 / 0.55), transparent 70%),
+    radial-gradient(ellipse 50% 35% at 75% 50%, oklch(0.95 0.012 85 / 0.4), transparent 70%);
+  filter: blur(20px);
+  animation: drift 28s ease-in-out infinite alternate;
+}
+
+@keyframes grain {
+  0% { transform: translate(0, 0); }
+  50% { transform: translate(-5%, 3%); }
+  100% { transform: translate(4%, -4%); }
+}
+@keyframes drift {
+  from { transform: translateX(-6%); }
+  to { transform: translateX(6%); }
+}
+@keyframes nudge {
+  0%, 100% { transform: translateY(0); opacity: 0.6; }
+  50% { transform: translateY(8px); opacity: 1; }
+}
+@utility animate-nudge { animation: nudge 2.2s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; }
+}
