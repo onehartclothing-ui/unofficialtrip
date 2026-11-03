@@ -11,24 +11,105 @@ import {
   type GuestRegistrationSession,
 } from "@/lib/registration.functions";
 
+function getEnvVar(name: string): string {
+  // Check process.env (Node runtime & Nitro)
+  if (typeof process !== "undefined" && process?.env && process.env[name]) {
+    return process.env[name].trim();
+  }
+  // Check import.meta.env (Vite / client & SSR runtime)
+  if (typeof import.meta !== "undefined" && import.meta?.env && (import.meta.env as Record<string, string | undefined>)[name]) {
+    return String((import.meta.env as Record<string, string | undefined>)[name]).trim();
+  }
+  // Check globalThis (worker / cloud runtimes)
+  if (typeof globalThis !== "undefined") {
+    const g = globalThis as Record<string, unknown>;
+    if (g[name] && typeof g[name] === "string") {
+      return (g[name] as string).trim();
+    }
+    const envObj = (g["__env__"] || g["env"] || g["process"] && (g["process"] as { env?: Record<string, string> }).env) as Record<string, unknown> | undefined;
+    if (envObj && typeof envObj === "object" && envObj[name] && typeof envObj[name] === "string") {
+      return (envObj[name] as string).trim();
+    }
+  }
+  return "";
+}
+
+/**
+ * Diagnostic helper that reports presence of Razorpay environment variables
+ * without EVER leaking the secret values.
+ */
+export function getRazorpayDiagnostics(): {
+  hasKeyId: boolean;
+  hasKeySecret: boolean;
+  keyIdSource: string | null;
+  keySecretSource: string | null;
+} {
+  const keyIdCandidates = [
+    "RAZORPAY_KEY_ID",
+    "VITE_RAZORPAY_KEY_ID",
+    "NEXT_PUBLIC_RAZORPAY_KEY_ID",
+    "TITU_RAZORPAY_KEY_ID",
+  ];
+  const secretCandidates = [
+    "RAZORPAY_KEY_SECRET",
+    "TITU_RAZORPAY_KEY_SECRET",
+  ];
+
+  let keyIdSource: string | null = null;
+  for (const name of keyIdCandidates) {
+    if (getEnvVar(name)) {
+      keyIdSource = name;
+      break;
+    }
+  }
+
+  let keySecretSource: string | null = null;
+  for (const name of secretCandidates) {
+    if (getEnvVar(name)) {
+      keySecretSource = name;
+      break;
+    }
+  }
+
+  return {
+    hasKeyId: Boolean(keyIdSource),
+    hasKeySecret: Boolean(keySecretSource),
+    keyIdSource,
+    keySecretSource,
+  };
+}
+
 export function getRazorpayClient(): { razorpay: Razorpay; keyId: string; keySecret: string } {
-  // Support both process.env and any prefixed environment variables commonly used in Vercel
+  const diag = getRazorpayDiagnostics();
+
   const keyId =
-    (typeof process !== "undefined" && process.env
-      ? process.env["RAZORPAY_KEY_ID"] ||
-        process.env["VITE_RAZORPAY_KEY_ID"] ||
-        process.env["TITU_RAZORPAY_KEY_ID"]
-      : "") || "";
+    getEnvVar("RAZORPAY_KEY_ID") ||
+    getEnvVar("VITE_RAZORPAY_KEY_ID") ||
+    getEnvVar("NEXT_PUBLIC_RAZORPAY_KEY_ID") ||
+    getEnvVar("TITU_RAZORPAY_KEY_ID") ||
+    "";
 
   const keySecret =
-    (typeof process !== "undefined" && process.env
-      ? process.env["RAZORPAY_KEY_SECRET"] ||
-        process.env["TITU_RAZORPAY_KEY_SECRET"]
-      : "") || "";
+    getEnvVar("RAZORPAY_KEY_SECRET") ||
+    getEnvVar("TITU_RAZORPAY_KEY_SECRET") ||
+    "";
+
+  // Safe server-side diagnostic logging (only logs existence and variable name, NEVER values)
+  console.info("[Razorpay Diagnostics]", {
+    hasKeyId: Boolean(keyId),
+    hasKeySecret: Boolean(keySecret),
+    keyIdFoundVia: diag.keyIdSource,
+    keySecretFoundVia: diag.keySecretSource,
+    environment: typeof process !== "undefined" && process?.env?.NODE_ENV ? process.env.NODE_ENV : "unknown",
+  });
 
   if (!keyId || !keySecret) {
+    const missing: string[] = [];
+    if (!keyId) missing.push("RAZORPAY_KEY_ID (or VITE_RAZORPAY_KEY_ID)");
+    if (!keySecret) missing.push("RAZORPAY_KEY_SECRET");
+
     throw new Error(
-      "Razorpay credentials are not configured on the server. Please ensure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET environment variables are set in your deployment settings.",
+      `Razorpay credentials are not configured on the server. Missing: ${missing.join(", ")}. Please set these in your Vercel Project Settings under Environment Variables (Production & Preview) and redeploy.`,
     );
   }
 
