@@ -3,11 +3,9 @@ import { z } from "zod";
 import { TRIP, COHORT_OPTIONS, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 
 /**
- * Session TTL for completing UPI payment after submitting or resuming a registration (7 days, renewed on every verified visit).
+ * Session TTL for completing UPI payment after submitting a registration (7 days, renewed on every verified visit).
  */
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-export const REGISTRATION_EXISTS_CODE = "REGISTRATION_EXISTS" as const;
 
 export type GuestRegistrationSession = {
   id: string;
@@ -95,8 +93,8 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
     const newTokenHash = await hashBookingSessionToken(newToken);
     const expiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
 
-    // 1. If the caller already has an active session in this browser (e.g. went back from payment to edit details),
-    //    verify ownership via their registrationId + sessionToken first so they can freely edit their name, email, phone, or cohort.
+    // 1. If the caller already has an active pending registration in this browser and went back from payment
+    //    to edit their own draft, verify ownership via registrationId + sessionToken and update that same draft.
     if (data.registrationId && data.sessionToken) {
       const { data: ownReg, error: ownErr } = await supabaseAdmin
         .from("registrations")
@@ -119,21 +117,6 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
           ownReg.status !== "pending_verification" &&
           ownReg.status !== "confirmed"
         ) {
-          // Ensure their edited email or phone does not collide with a DIFFERENT registration record
-          const { data: conflicts, error: conflictErr } = await supabaseAdmin
-            .from("registrations")
-            .select("id, booking_id, status")
-            .or(`email.eq.${emailRes.email},phone.eq.${phoneRes.phone}`)
-            .neq("id", ownReg.id);
-
-          if (conflictErr) throw new Error(conflictErr.message);
-
-          if (conflicts && conflicts.length > 0) {
-            throw new Error(
-              "REGISTRATION_EXISTS: An active or completed registration already exists with this email or phone number. Please use 'Already Registered? Continue Your Booking' to verify your email and resume your booking.",
-            );
-          }
-
           const { data: updated, error: updateErr } = await supabaseAdmin
             .from("registrations")
             .update({
@@ -171,85 +154,9 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
       }
     }
 
-    // 2. Otherwise check if an existing registration matches this email or phone
-    const { data: existingList, error: findErr } = await supabaseAdmin
-      .from("registrations")
-      .select("*")
-      .or(`email.eq.${emailRes.email},phone.eq.${phoneRes.phone}`);
-
-    if (findErr) {
-      throw new Error(findErr.message);
-    }
-
-    if (existingList && existingList.length > 0) {
-      // NEVER allow an unauthenticated caller to modify an existing registration
-      // unless they prove ownership with the active, unexpired session_token.
-      if (!data.sessionToken || existingList.length > 1) {
-        throw new Error(
-          "REGISTRATION_EXISTS: This email or phone number is already registered. Please use 'Already Registered? Continue Your Booking' to verify your email and continue from where you left off.",
-        );
-      }
-
-      const existing = existingList[0]!;
-      if (existing.status === "pending_verification" || existing.status === "confirmed") {
-        throw new Error(
-          `REGISTRATION_EXISTS: Payment has already been submitted for this registration (Ref: ${existing.booking_id}). Please use 'Already Registered? Continue Your Booking' to check your status.`,
-        );
-      }
-
-      const callerHash = await hashBookingSessionToken(data.sessionToken);
-      const isExpired =
-        !existing.session_expires_at ||
-        new Date(existing.session_expires_at).getTime() <= now.getTime();
-
-      if (
-        !existing.session_token_hash ||
-        isExpired ||
-        !constantTimeEqualHex(existing.session_token_hash, callerHash)
-      ) {
-        throw new Error(
-          "REGISTRATION_EXISTS: This email or phone number is already registered. Please use 'Already Registered? Continue Your Booking' to verify your email and continue your booking.",
-        );
-      }
-
-      // Caller holds the valid, unexpired session token for this exact registration -> allow updating their own draft
-      const { data: updated, error: updateErr } = await supabaseAdmin
-        .from("registrations")
-        .update({
-          full_name: data.fullName,
-          email: emailRes.email,
-          phone: phoneRes.phone,
-          cohort: data.cohort,
-          session_token_hash: newTokenHash,
-          session_expires_at: expiresAtIso,
-          terms_accepted_at: nowIso,
-          refund_ack_accepted_at: nowIso,
-          policy_version: TRIP.policyVersion,
-          updated_at: nowIso,
-        })
-        .eq("id", existing.id)
-        .select("*")
-        .single();
-
-      if (updateErr) {
-        throw new Error(updateErr.message);
-      }
-
-      return {
-        id: updated.id,
-        booking_id: updated.booking_id,
-        full_name: updated.full_name,
-        email: updated.email,
-        phone: updated.phone,
-        cohort: updated.cohort,
-        status: updated.status,
-        utr: updated.utr,
-        admin_note: updated.admin_note,
-        session_token: newToken,
-        session_expires_at: expiresAtIso,
-      };
-    }
-
+    // 2. Otherwise, create a new independent registration with its own unique booking_id.
+    //    Never block a student because their email or phone number was used previously,
+    //    and never overwrite or merge existing registrations based only on matching email/phone.
     const guestUserId = crypto.randomUUID();
 
     const { data: inserted, error: insertErr } = await supabaseAdmin
@@ -295,7 +202,7 @@ const verifyGuestSessionSchema = z.object({
 });
 
 /**
- * Verifies an existing guest booking session on the server (e.g. when reopening or refreshing the website)
+ * Verifies an existing guest booking session on the server (e.g. when reopening or refreshing the payment page)
  * and renews the session expiry so active bookings are not invalidated across visits.
  */
 export const getGuestRegistrationSessionServer = createServerFn({ method: "POST" })
@@ -325,7 +232,6 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       return null;
     }
 
-    // Renew session expiry on verified visit so active bookings stay valid
     const renewedExpiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
     await supabaseAdmin
       .from("registrations")
@@ -344,145 +250,6 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       admin_note: reg.admin_note,
       session_token: data.sessionToken,
       session_expires_at: renewedExpiresAtIso,
-    };
-  });
-
-const checkRegistrationEmailSchema = z.object({
-  email: z.string().trim().max(255),
-});
-
-/**
- * Checks whether a registration exists for the given email without leaking any PII or booking details,
- * and ensures a pre-confirmed Supabase Auth user exists for that email so `supabase.auth.signInWithOtp`
- * always uses the Magic Link / OTP Login template instead of the first-time "Confirm your signup" template.
- */
-export const checkRegistrationEmailExistsServer = createServerFn({ method: "POST" })
-  .inputValidator((input: unknown) => checkRegistrationEmailSchema.parse(input))
-  .handler(async ({ data }): Promise<{ exists: boolean }> => {
-    const emailRes = validateEmail(data.email);
-    if (!emailRes.valid) {
-      throw new Error(emailRes.error ?? "Please enter a valid email address");
-    }
-
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: reg, error } = await supabaseAdmin
-      .from("registrations")
-      .select("id")
-      .eq("email", emailRes.email)
-      .maybeSingle();
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    if (!reg) {
-      return { exists: false };
-    }
-
-    // Ensure the returning student has a pre-confirmed auth.users entry so Supabase Auth
-    // sends the Login OTP / Magic Link email rather than the "Confirm your signup" email.
-    try {
-      const { error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
-        email: emailRes.email,
-        email_confirm: true,
-      });
-
-      if (createAuthErr && /already|exists|registered/i.test(createAuthErr.message)) {
-        // User already exists in auth.users; ensure their email_confirm is true in case a previous unconfirmed signup occurred
-        const { data: listData } = await supabaseAdmin.auth.admin.listUsers({
-          page: 1,
-          perPage: 200,
-        });
-        const existingAuthUser = listData?.users?.find(
-          (u) => u.email?.toLowerCase() === emailRes.email,
-        );
-        if (existingAuthUser && !existingAuthUser.email_confirmed_at) {
-          await supabaseAdmin.auth.admin.updateUserById(existingAuthUser.id, {
-            email_confirm: true,
-          });
-        }
-      }
-    } catch {
-      // Non-fatal: client signInWithOtp will still proceed
-    }
-
-    return { exists: true };
-  });
-
-const resumeRegistrationByVerifiedEmailSchema = z.object({
-  accessToken: z.string().min(10, "Missing verification token"),
-});
-
-/**
- * Securely resumes an existing registration after a returning student verifies ownership of their email
- * via Supabase Auth (OTP or magic link). Verifies the Supabase Auth JWT on the server, matches the
- * verified email to `public.registrations`, and issues a fresh renewable booking session token.
- * Never allows access using an unverified email or phone number.
- */
-export const resumeRegistrationByVerifiedEmailServer = createServerFn({ method: "POST" })
-  .inputValidator((input: unknown) => resumeRegistrationByVerifiedEmailSchema.parse(input))
-  .handler(async ({ data }): Promise<GuestRegistrationSession> => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-    const { data: userData, error: authErr } = await supabaseAdmin.auth.getUser(
-      data.accessToken,
-    );
-
-    if (authErr || !userData?.user?.email) {
-      throw new Error("Could not verify your email session. Please request a new verification code.");
-    }
-
-    const verifiedEmail = userData.user.email.trim().toLowerCase();
-
-    const { data: reg, error: findErr } = await supabaseAdmin
-      .from("registrations")
-      .select("*")
-      .eq("email", verifiedEmail)
-      .maybeSingle();
-
-    if (findErr) {
-      throw new Error(findErr.message);
-    }
-
-    if (!reg) {
-      throw new Error(
-        "No existing registration was found for this email. Please switch to 'New Student — Register' to create your booking.",
-      );
-    }
-
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const newToken = generateBookingSessionToken();
-    const newTokenHash = await hashBookingSessionToken(newToken);
-    const expiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-
-    const { data: updated, error: updateErr } = await supabaseAdmin
-      .from("registrations")
-      .update({
-        session_token_hash: newTokenHash,
-        session_expires_at: expiresAtIso,
-        updated_at: nowIso,
-      })
-      .eq("id", reg.id)
-      .select("*")
-      .single();
-
-    if (updateErr) {
-      throw new Error(updateErr.message);
-    }
-
-    return {
-      id: updated.id,
-      booking_id: updated.booking_id,
-      full_name: updated.full_name,
-      email: updated.email,
-      phone: updated.phone,
-      cohort: updated.cohort,
-      status: updated.status,
-      utr: updated.utr,
-      admin_note: updated.admin_note,
-      session_token: newToken,
-      session_expires_at: expiresAtIso,
     };
   });
 
@@ -535,24 +302,22 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
       !reg.session_token_hash ||
       !constantTimeEqualHex(reg.session_token_hash, callerHash)
     ) {
-      throw new Error("Invalid booking session. Please verify your email under 'Already Registered? Continue Your Booking' to resume.");
+      throw new Error("Invalid booking session. Please fill out the registration form again.");
     }
 
     if (isExpired) {
-      throw new Error("Your booking session has expired. Please verify your email under 'Already Registered? Continue Your Booking' to continue.");
+      throw new Error("Your booking session has expired. Please fill out the registration form again.");
     }
 
-    // Check duplicate UTR
-    const { data: dupUtr } = await supabaseAdmin
+    // Check if the same UTR has been submitted on another registration -> flag for admin review
+    const { data: dupUtrList } = await supabaseAdmin
       .from("registrations")
-      .select("id")
+      .select("id, booking_id, status")
       .eq("utr", cleanUtr)
-      .neq("id", reg.id)
-      .maybeSingle();
+      .neq("id", reg.id);
 
-    if (dupUtr) {
-      throw new Error("This UTR / Transaction ID has already been submitted");
-    }
+    const hasDuplicateUtr = Boolean(dupUtrList && dupUtrList.length > 0);
+    const duplicateRefs = (dupUtrList ?? []).map((r) => r.booking_id).join(", ");
 
     // Decode and validate screenshot on the server before uploading to private storage
     const buffer = Buffer.from(data.fileBase64, "base64");
@@ -579,7 +344,10 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
     const renewedTokenHash = await hashBookingSessionToken(renewedToken);
     const renewedExpiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
 
-    // Rotate and keep a valid session token so the student can revisit and check their status anytime
+    const duplicateNote = hasDuplicateUtr
+      ? `FLAGGED FOR ADMIN REVIEW: Duplicate UTR (${cleanUtr}) also submitted on booking ${duplicateRefs}.`
+      : reg.admin_note;
+
     const { data: updated, error: updateErr } = await supabaseAdmin
       .from("registrations")
       .update({
@@ -591,6 +359,7 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
         refund_ack_accepted_at: reg.refund_ack_accepted_at ?? nowIso,
         policy_version: TRIP.policyVersion,
         payment_submitted_at: nowIso,
+        admin_note: duplicateNote,
         status: "pending_verification",
         updated_at: nowIso,
       })

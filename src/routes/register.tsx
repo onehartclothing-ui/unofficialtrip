@@ -1,7 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { PageShell } from "@/components/site/PageShell";
 import {
   TRIP,
@@ -9,7 +8,6 @@ import {
   buildUpiLink,
   buildIosUpiAppLinks,
   detectDevicePlatform,
-  getAuthRedirectUrl,
   validateEmail,
   normalizeIndianPhone,
 } from "@/lib/trip";
@@ -17,8 +15,6 @@ import upiQr from "@/assets/upi-qr.jpg";
 import {
   createGuestRegistrationServer,
   getGuestRegistrationSessionServer,
-  checkRegistrationEmailExistsServer,
-  resumeRegistrationByVerifiedEmailServer,
   submitGuestPaymentServer,
   type GuestRegistrationSession,
 } from "@/lib/registration.functions";
@@ -116,13 +112,10 @@ const input =
   "w-full rounded-md border border-input bg-transparent px-4 py-3.5 text-base text-bone placeholder:text-muted-foreground focus:border-ember focus:outline-none";
 const primaryBtn =
   "w-full rounded-full bg-ember px-6 py-4 font-display text-xl text-ink transition-opacity disabled:opacity-40";
-const errMsg = (e: unknown) => {
-  const raw =
-    e instanceof Error
-      ? e.message
-      : (e as { message?: string })?.message ?? "Something went wrong";
-  return raw.replace(/^REGISTRATION_EXISTS:\s*/i, "");
-};
+const errMsg = (e: unknown) =>
+  e instanceof Error
+    ? e.message
+    : (e as { message?: string })?.message ?? "Something went wrong";
 
 async function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -169,42 +162,6 @@ function RegisterPage() {
     }
     setHydrated(true);
   }, []);
-
-  // Automatically resume booking if a student clicked a magic link from their email
-  useEffect(() => {
-    if (!hydrated || reg) return;
-    let active = true;
-    try {
-      const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
-        if (!active) return;
-        if (
-          (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") &&
-          session?.access_token
-        ) {
-          void resumeRegistrationByVerifiedEmailServer({
-            data: { accessToken: session.access_token },
-          })
-            .then((resumed) => {
-              if (!active) return;
-              setReg(resumed);
-              setEditingDraft(false);
-              saveStoredSession(resumed);
-            })
-            .catch(() => {
-              // Ignore if the signed-in user has no guest registration (e.g. admin session)
-            });
-        }
-      });
-      return () => {
-        active = false;
-        sub.subscription.unsubscribe();
-      };
-    } catch {
-      return () => {
-        active = false;
-      };
-    }
-  }, [hydrated, reg]);
 
   function updateReg(next: GuestRegistrationSession | null) {
     setReg(next);
@@ -260,7 +217,6 @@ function DetailsStep({
   onResumePayment?: () => void;
   onStartFresh?: () => void;
 }) {
-  const [mode, setMode] = useState<"new" | "returning">("new");
   const [fullName, setFullName] = useState(initial?.full_name ?? "");
   const [email, setEmail] = useState(initial?.email ?? "");
   const [phone, setPhone] = useState(initial?.phone ?? "");
@@ -268,24 +224,7 @@ function DetailsStep({
   const [terms, setTerms] = useState(Boolean(initial));
   const [refund, setRefund] = useState(Boolean(initial));
   const [busy, setBusy] = useState(false);
-  const [conflictEmailPrompt, setConflictEmailPrompt] = useState<string | null>(null);
   const submittingRef = useRef(false);
-
-  // Returning student verification state
-  const [returningEmail, setReturningEmail] = useState(initial?.email ?? "");
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCode, setOtpCode] = useState("");
-  const [returningBusy, setReturningBusy] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(0);
-  const returningRef = useRef(false);
-
-  useEffect(() => {
-    if (resendCooldown <= 0) return;
-    const timer = setInterval(() => {
-      setResendCooldown((prev) => (prev > 1 ? prev - 1 : 0));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [resendCooldown]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -340,7 +279,6 @@ function DetailsStep({
 
     submittingRef.current = true;
     setBusy(true);
-    setConflictEmailPrompt(null);
     try {
       const hasValidSessionToken =
         initial?.session_token && /^[0-9a-f]{64}$/.test(initial.session_token);
@@ -356,17 +294,6 @@ function DetailsStep({
       });
       onDone(serverSession);
     } catch (err) {
-      const raw =
-        err instanceof Error
-          ? err.message
-          : (err as { message?: string })?.message ?? "Something went wrong";
-      if (
-        raw.includes("REGISTRATION_EXISTS") ||
-        /already exists|already registered|already been submitted/i.test(raw)
-      ) {
-        setReturningEmail(emailCheck.email);
-        setConflictEmailPrompt(emailCheck.email);
-      }
       toast.error(errMsg(err));
     } finally {
       submittingRef.current = false;
@@ -374,204 +301,11 @@ function DetailsStep({
     }
   }
 
-  async function requestReturningVerification(e: React.FormEvent) {
-    e.preventDefault();
-    if (returningRef.current || returningBusy || resendCooldown > 0) return;
-
-    const emailCheck = validateEmail(returningEmail);
-    if (!emailCheck.valid) {
-      toast.error(emailCheck.error ?? "Please enter a valid email address");
-      return;
-    }
-
-    // Fast path: if this browser already holds an active, valid session for this exact email, verify & resume immediately
-    if (
-      initial &&
-      initial.email === emailCheck.email &&
-      /^[0-9a-f]{64}$/.test(initial.session_token ?? "")
-    ) {
-      returningRef.current = true;
-      setReturningBusy(true);
-      try {
-        const refreshed = await getGuestRegistrationSessionServer({
-          data: {
-            registrationId: initial.id,
-            sessionToken: initial.session_token,
-          },
-        });
-        if (refreshed) {
-          onDone(refreshed);
-          return;
-        }
-      } catch {
-        // Fall through to email OTP verification if session expired
-      } finally {
-        returningRef.current = false;
-        setReturningBusy(false);
-      }
-    }
-
-    returningRef.current = true;
-    setReturningBusy(true);
-    try {
-      const { exists } = await checkRegistrationEmailExistsServer({
-        data: { email: emailCheck.email },
-      });
-      if (!exists) {
-        toast.error(
-          "No existing registration found for this email. Please select 'New Student — Register' to register.",
-        );
-        return;
-      }
-
-      const redirectTo = getAuthRedirectUrl("/auth/callback");
-      const { error } = await supabase.auth.signInWithOtp({
-        email: emailCheck.email,
-        options: {
-          shouldCreateUser: true,
-          emailRedirectTo: redirectTo,
-        },
-      });
-      if (error) {
-        if (/rate limit|too many|security purposes/i.test(error.message)) {
-          throw new Error(
-            "Please wait 60 seconds before requesting another verification code.",
-          );
-        }
-        throw error;
-      }
-
-      setOtpSent(true);
-      setResendCooldown(60);
-      toast.success("Verification code sent to your email!");
-    } catch (err) {
-      toast.error(errMsg(err));
-    } finally {
-      returningRef.current = false;
-      setReturningBusy(false);
-    }
-  }
-
-  async function verifyReturningOtp(e: React.FormEvent) {
-    e.preventDefault();
-    if (returningRef.current || returningBusy) return;
-
-    const emailCheck = validateEmail(returningEmail);
-    if (!emailCheck.valid) {
-      toast.error(emailCheck.error ?? "Please enter a valid email address");
-      return;
-    }
-
-    const token = otpCode.trim();
-    if (!/^\d{6,8}$/.test(token)) {
-      toast.error("Please enter the 6-digit verification code from your email");
-      return;
-    }
-
-    returningRef.current = true;
-    setReturningBusy(true);
-    try {
-      let verifyData: { session: { access_token: string } | null } | null = null;
-      let verifyErr: Error | null = null;
-
-      // Verify with type 'email' (covers both OTP login & magiclink OTPs in Supabase Auth),
-      // with fallback to 'signup' if an unconfirmed user received a signup OTP before template update.
-      const resEmail = await supabase.auth.verifyOtp({
-        email: emailCheck.email,
-        token,
-        type: "email",
-      });
-
-      if (!resEmail.error && resEmail.data?.session?.access_token) {
-        verifyData = resEmail.data;
-      } else {
-        const resSignup = await supabase.auth.verifyOtp({
-          email: emailCheck.email,
-          token,
-          type: "signup",
-        });
-        if (!resSignup.error && resSignup.data?.session?.access_token) {
-          verifyData = resSignup.data;
-        } else {
-          verifyErr = resEmail.error ?? resSignup.error;
-        }
-      }
-
-      if (verifyErr || !verifyData?.session?.access_token) {
-        const rawErr = verifyErr?.message ?? "";
-        if (/expired/i.test(rawErr)) {
-          throw new Error(
-            "This verification code has expired. Please click 'Resend verification code' to get a new 6-digit code.",
-          );
-        }
-        throw new Error(
-          "Incorrect or expired verification code. Please check the 6-digit code in your email or request a new one.",
-        );
-      }
-
-      const resumed = await resumeRegistrationByVerifiedEmailServer({
-        data: { accessToken: verifyData.session.access_token },
-      });
-
-      onDone(resumed);
-    } catch (err) {
-      toast.error(errMsg(err));
-    } finally {
-      returningRef.current = false;
-      setReturningBusy(false);
-    }
-  }
-
   return (
     <div>
       <p className="eyebrow text-ember">Step 1 of 2 · Registration</p>
       <h1 className="font-display mt-3 text-6xl md:text-8xl">Count me in.</h1>
-      <p className="mt-3 text-bone/80">
-        Register as a new student or continue an existing booking where you left off.
-      </p>
-
-      {/* Mode Selector: New Student vs Returning Student */}
-      <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <button
-          type="button"
-          onClick={() => {
-            setMode("new");
-            setConflictEmailPrompt(null);
-          }}
-          className={`rounded-xl border px-4 py-3.5 text-left transition-colors ${
-            mode === "new"
-              ? "border-ember bg-ember/10 text-bone"
-              : "border-border bg-card text-muted-foreground hover:border-bone hover:text-bone"
-          }`}
-        >
-          <span className="font-display block text-lg text-bone">
-            New Student — Register
-          </span>
-          <span className="mt-0.5 block text-xs text-muted-foreground">
-            First time registering for Coorg 2026
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setMode("returning");
-            if (email && !returningEmail) setReturningEmail(email);
-          }}
-          className={`rounded-xl border px-4 py-3.5 text-left transition-colors ${
-            mode === "returning"
-              ? "border-ember bg-ember/10 text-bone"
-              : "border-border bg-card text-muted-foreground hover:border-bone hover:text-bone"
-          }`}
-        >
-          <span className="font-display block text-lg text-bone">
-            Already Registered? Continue Your Booking
-          </span>
-          <span className="mt-0.5 block text-xs text-muted-foreground">
-            Resume pending payment or check verification status
-          </span>
-        </button>
-      </div>
+      <p className="mt-3 text-bone/80">Fill in your details below to proceed to payment.</p>
 
       {initial && onResumePayment && (
         <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-4 text-sm">
@@ -602,236 +336,118 @@ function DetailsStep({
         </div>
       )}
 
-      {conflictEmailPrompt && mode === "new" && (
-        <div className="mt-6 rounded-xl border border-ember bg-card p-5 text-sm">
-          <p className="eyebrow text-ember">Existing registration found</p>
-          <p className="mt-2 text-bone/90">
-            We found an existing booking for{" "}
-            <span className="font-mono text-bone">{conflictEmailPrompt}</span>. You do not need to
-            register again—verify your email to continue directly to your booking and payment page.
-          </p>
-          <button
-            type="button"
-            onClick={() => {
-              setReturningEmail(conflictEmailPrompt);
-              setMode("returning");
-              setConflictEmailPrompt(null);
-            }}
-            className="mt-4 rounded-full bg-ember px-5 py-2.5 font-display text-base text-ink"
+      <form onSubmit={submit} className="mt-8 space-y-5">
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Full Name</span>
+          <input
+            className={input}
+            type="text"
+            required
+            minLength={2}
+            maxLength={100}
+            autoComplete="name"
+            placeholder="Your full name"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+          />
+        </label>
+
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Mesa Email ID</span>
+          <input
+            className={input}
+            type="email"
+            required
+            maxLength={255}
+            autoComplete="email"
+            placeholder="you@mesabusinessschool.org"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">Phone Number</span>
+          <input
+            className={input}
+            type="tel"
+            inputMode="tel"
+            required
+            autoComplete="tel"
+            placeholder="+91 98765 43210"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+          />
+        </label>
+
+        <label className="block">
+          <span className="eyebrow mb-2 block text-muted-foreground">
+            Which cohort are you in?
+          </span>
+          <select
+            className={`${input} bg-ink`}
+            required
+            value={cohort}
+            onChange={(e) => setCohort(e.target.value)}
           >
-            Continue Your Booking →
-          </button>
-        </div>
-      )}
-
-      {mode === "returning" ? (
-        <div className="mt-8 rounded-xl border border-border bg-card p-6 md:p-8">
-          <p className="eyebrow text-ember">Returning Student · Secure Booking Recovery</p>
-          <h2 className="font-display mt-2 text-3xl text-bone md:text-4xl">
-            Continue Your Booking
-          </h2>
-          <p className="mt-2 text-sm text-bone/80">
-            Enter the email address you registered with. We will send a 6-digit verification code
-            to confirm your identity and restore your booking.
-          </p>
-
-          {!otpSent ? (
-            <form onSubmit={requestReturningVerification} className="mt-6 space-y-5">
-              <label className="block">
-                <span className="eyebrow mb-2 block text-muted-foreground">
-                  Registered Email ID
-                </span>
-                <input
-                  className={input}
-                  type="email"
-                  required
-                  maxLength={255}
-                  autoComplete="email"
-                  placeholder="you@mesabusinessschool.org"
-                  value={returningEmail}
-                  onChange={(e) => setReturningEmail(e.target.value)}
-                />
-              </label>
-
-              <button
-                type="submit"
-                disabled={returningBusy || resendCooldown > 0}
-                className={primaryBtn}
-              >
-                {returningBusy
-                  ? "Sending verification…"
-                  : resendCooldown > 0
-                    ? `WAIT ${resendCooldown}S TO RESEND`
-                    : "SEND VERIFICATION CODE →"}
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={verifyReturningOtp} className="mt-6 space-y-5">
-              <div className="rounded-lg border border-border bg-ink/60 p-4 text-sm text-bone/90">
-                Verification code sent to{" "}
-                <span className="font-mono text-bone">{returningEmail}</span>. Enter the 6-digit
-                verification code from your email below.
-              </div>
-
-              <label className="block">
-                <span className="eyebrow mb-2 block text-muted-foreground">
-                  Email Verification Code (OTP)
-                </span>
-                <input
-                  className={`${input} font-mono tracking-widest`}
-                  type="text"
-                  inputMode="numeric"
-                  required
-                  maxLength={8}
-                  placeholder="Enter 6-digit code"
-                  value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value.replace(/\D+/g, ""))}
-                />
-              </label>
-
-              <button type="submit" disabled={returningBusy} className={primaryBtn}>
-                {returningBusy ? "Verifying & restoring…" : "VERIFY & CONTINUE BOOKING →"}
-              </button>
-
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOtpSent(false);
-                    setOtpCode("");
-                  }}
-                  className="eyebrow text-muted-foreground hover:text-bone"
-                >
-                  ← Use a different email
-                </button>
-                <button
-                  type="button"
-                  disabled={returningBusy || resendCooldown > 0}
-                  onClick={(e) => void requestReturningVerification(e)}
-                  className="eyebrow text-muted-foreground hover:text-bone disabled:opacity-50"
-                >
-                  {resendCooldown > 0
-                    ? `Resend code in ${resendCooldown}s`
-                    : "Resend verification code"}
-                </button>
-              </div>
-            </form>
-          )}
-        </div>
-      ) : (
-        <form onSubmit={submit} className="mt-8 space-y-5">
-          <label className="block">
-            <span className="eyebrow mb-2 block text-muted-foreground">Full Name</span>
-            <input
-              className={input}
-              type="text"
-              required
-              minLength={2}
-              maxLength={100}
-              autoComplete="name"
-              placeholder="Your full name"
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-            />
-          </label>
-
-          <label className="block">
-            <span className="eyebrow mb-2 block text-muted-foreground">Mesa Email ID</span>
-            <input
-              className={input}
-              type="email"
-              required
-              maxLength={255}
-              autoComplete="email"
-              placeholder="you@mesabusinessschool.org"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </label>
-
-          <label className="block">
-            <span className="eyebrow mb-2 block text-muted-foreground">Phone Number</span>
-            <input
-              className={input}
-              type="tel"
-              inputMode="tel"
-              required
-              autoComplete="tel"
-              placeholder="+91 98765 43210"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-            />
-          </label>
-
-          <label className="block">
-            <span className="eyebrow mb-2 block text-muted-foreground">
-              Which cohort are you in?
-            </span>
-            <select
-              className={`${input} bg-ink`}
-              required
-              value={cohort}
-              onChange={(e) => setCohort(e.target.value)}
-            >
-              <option value="" disabled className="bg-ink text-muted-foreground">
-                Select your cohort
+            <option value="" disabled className="bg-ink text-muted-foreground">
+              Select your cohort
+            </option>
+            {COHORT_OPTIONS.map((opt) => (
+              <option key={opt} value={opt} className="bg-ink text-bone">
+                {opt}
               </option>
-              {COHORT_OPTIONS.map((opt) => (
-                <option key={opt} value={opt} className="bg-ink text-bone">
-                  {opt}
-                </option>
-              ))}
-            </select>
+            ))}
+          </select>
+        </label>
+
+        <div className="rounded-xl border border-border bg-card p-5">
+          <p className="font-display text-2xl text-bone">COORG 2026</p>
+          <p className="eyebrow mt-1.5 text-muted-foreground">20–22 NOVEMBER</p>
+          <p className="font-display mt-2 text-2xl text-ember">₹8,500 / PERSON</p>
+        </div>
+
+        <div className="space-y-3 pt-1">
+          <label className="flex cursor-pointer gap-3 text-sm leading-relaxed">
+            <input
+              type="checkbox"
+              required
+              checked={terms}
+              onChange={(e) => setTerms(e.target.checked)}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]"
+            />
+            <span>
+              I agree to the{" "}
+              <Link to="/terms" target="_blank" className="underline">
+                Terms & Conditions
+              </Link>{" "}
+              and{" "}
+              <Link to="/privacy" target="_blank" className="underline">
+                Privacy Policy
+              </Link>
+              .
+            </span>
           </label>
 
-          <div className="rounded-xl border border-border bg-card p-5">
-            <p className="font-display text-2xl text-bone">COORG 2026</p>
-            <p className="eyebrow mt-1.5 text-muted-foreground">20–22 NOVEMBER</p>
-            <p className="font-display mt-2 text-2xl text-ember">₹8,500 / PERSON</p>
-          </div>
+          <label className="flex cursor-pointer gap-3 text-sm leading-relaxed">
+            <input
+              type="checkbox"
+              required
+              checked={refund}
+              onChange={(e) => setRefund(e.target.checked)}
+              className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]"
+            />
+            <span>
+              I understand that my ₹8,500 payment is non-refundable if I voluntarily cancel,
+              subject to applicable law.
+            </span>
+          </label>
+        </div>
 
-          <div className="space-y-3 pt-1">
-            <label className="flex cursor-pointer gap-3 text-sm leading-relaxed">
-              <input
-                type="checkbox"
-                required
-                checked={terms}
-                onChange={(e) => setTerms(e.target.checked)}
-                className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]"
-              />
-              <span>
-                I agree to the{" "}
-                <Link to="/terms" target="_blank" className="underline">
-                  Terms & Conditions
-                </Link>{" "}
-                and{" "}
-                <Link to="/privacy" target="_blank" className="underline">
-                  Privacy Policy
-                </Link>
-                .
-              </span>
-            </label>
-
-            <label className="flex cursor-pointer gap-3 text-sm leading-relaxed">
-              <input
-                type="checkbox"
-                required
-                checked={refund}
-                onChange={(e) => setRefund(e.target.checked)}
-                className="mt-1 h-5 w-5 shrink-0 accent-[var(--ember)]"
-              />
-              <span>
-                I understand that my ₹8,500 payment is non-refundable if I voluntarily cancel,
-                subject to applicable law.
-              </span>
-            </label>
-          </div>
-
-          <button type="submit" disabled={busy || !terms || !refund} className={primaryBtn}>
-            {busy ? "Saving…" : "CONTINUE TO PAYMENT →"}
-          </button>
-        </form>
-      )}
+        <button type="submit" disabled={busy || !terms || !refund} className={primaryBtn}>
+          {busy ? "Saving…" : "CONTINUE TO PAYMENT →"}
+        </button>
+      </form>
     </div>
   );
 }
@@ -1228,7 +844,8 @@ function Confirmed({
           </div>
           <div>
             <dt className="eyebrow text-muted-foreground">Dates</dt>
-            <dd className="mt-1 text-lg">20–22 November 2026</dd></div>
+            <dd className="mt-1 text-lg">20–22 November 2026</dd>
+          </div>
           <div>
             <dt className="eyebrow text-muted-foreground">Amount</dt>
             <dd className="mt-1 text-lg">₹8,500</dd>
@@ -1239,7 +856,11 @@ function Confirmed({
           </div>
         </dl>
       </div>
-      <button type="button" onClick={() => downloadConfirmation(reg)} className={`${primaryBtn} mt-8`}>
+      <button
+        type="button"
+        onClick={() => downloadConfirmation(reg)}
+        className={`${primaryBtn} mt-8`}
+      >
         Download confirmation
       </button>
       <button

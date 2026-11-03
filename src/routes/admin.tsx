@@ -148,6 +148,16 @@ function AdminPage() {
   }
 
   const count = (s: string) => rows.filter((r) => r.status === s).length;
+  const utrCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      if (r.utr) {
+        const key = r.utr.trim().toUpperCase();
+        map.set(key, (map.get(key) ?? 0) + 1);
+      }
+    }
+    return map;
+  }, [rows]);
 
   return (
     <Wrap>
@@ -189,6 +199,11 @@ function AdminPage() {
             {r.utr && (
               <div className="mt-4 flex flex-wrap items-center gap-4 text-sm">
                 <span>UTR: <span className="font-mono">{r.utr}</span></span>
+                {(utrCounts.get(r.utr.trim().toUpperCase()) ?? 0) > 1 && (
+                  <span className="eyebrow rounded-full border border-destructive px-2.5 py-0.5 text-destructive">
+                    Duplicate UTR ({utrCounts.get(r.utr.trim().toUpperCase())}x) — Review
+                  </span>
+                )}
                 {r.screenshot_path && <button onClick={() => viewShot(r.screenshot_path!)} className="underline">View screenshot</button>}
                 {r.payment_submitted_at && <span className="text-muted-foreground">{new Date(r.payment_submitted_at).toLocaleString("en-IN")}</span>}
               </div>
