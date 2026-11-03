@@ -14,12 +14,8 @@ alter table public.registrations
   alter column user_id set default gen_random_uuid(),
   alter column status set default 'registration_started';
 
-create index if not exists idx_registrations_session_token_hash
-  on public.registrations (session_token_hash)
-  where session_token_hash is not null;
-
--- Allow unlimited registrations using the same email or phone number,
--- and allow duplicate UTR submissions to be flagged for organizer review
+-- Allow unlimited registrations using the same email or phone number without blocking students,
+-- and allow duplicate UTR submissions to be recorded and flagged for organizer review.
 alter table public.registrations
   drop constraint if exists registrations_email_key,
   drop constraint if exists registrations_phone_key,
@@ -31,11 +27,14 @@ drop index if exists public.registrations_utr_key;
 
 create index if not exists idx_registrations_email
   on public.registrations (email);
-create index if not exists idx_registrations_phone
-  on public.registrations (phone);
+
 create index if not exists idx_registrations_utr
   on public.registrations (utr)
   where utr is not null;
+
+create index if not exists idx_registrations_session_token_hash
+  on public.registrations (session_token_hash)
+  where session_token_hash is not null;
 
 -- 2. Remove publicly callable SECURITY DEFINER guest RPC functions
 --    Guest registration and payment submission now happen strictly on the server

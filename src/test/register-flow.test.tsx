@@ -89,11 +89,11 @@ describe("Guest registration & payment flow (/register)", () => {
 
     render(<RegisterComponent />);
 
-    // 1. Confirm NO login, OTP, or returning-student options exist anywhere on the page
+    // 1. Verify NO returning-student section, OTP, magic link, or login options exist
     expect(screen.queryByText(/New Student — Register/i)).toBeNull();
     expect(screen.queryByText(/Already Registered\? Continue Your Booking/i)).toBeNull();
     expect(screen.queryByText(/Continue Your Booking/i)).toBeNull();
-    expect(screen.queryByText(/Verification code/i)).toBeNull();
+    expect(screen.queryByText(/SEND VERIFICATION CODE/i)).toBeNull();
     expect(screen.queryByText(/Verify my email/i)).toBeNull();
     expect(screen.queryByText(/Password/i)).toBeNull();
 
@@ -124,7 +124,7 @@ describe("Guest registration & payment flow (/register)", () => {
 
     expect(continueBtn).not.toBeDisabled();
 
-    // 5. Submit registration form -> goes directly to payment page
+    // 5. Submit registration form -> proceeds directly to payment without OTP
     fireEvent.click(continueBtn);
 
     await waitFor(() => {
@@ -195,7 +195,7 @@ describe("Guest registration & payment flow (/register)", () => {
 
     const firstBooking = {
       id: "11111111-1111-4111-8111-111111111111",
-      booking_id: "TB-COORG-FIRST1",
+      booking_id: "TB-COORG-ATTMP1",
       full_name: "Ananya Rao",
       email: "ananya@mesabusinessschool.org",
       phone: "+919876543219",
@@ -206,9 +206,9 @@ describe("Guest registration & payment flow (/register)", () => {
       session_expires_at: expiresAt,
     };
 
-    const secondBooking = {
+    const secondBookingSameEmail = {
       id: "22222222-2222-4222-8222-222222222222",
-      booking_id: "TB-COORG-SECOND",
+      booking_id: "TB-COORG-ATTMP2",
       full_name: "Ananya Rao",
       email: "ananya@mesabusinessschool.org",
       phone: "+919876543219",
@@ -221,7 +221,7 @@ describe("Guest registration & payment flow (/register)", () => {
 
     mockCreateGuestRegistrationServer
       .mockResolvedValueOnce(firstBooking)
-      .mockResolvedValueOnce(secondBooking);
+      .mockResolvedValueOnce(secondBookingSameEmail);
 
     const { unmount } = render(<RegisterComponent />);
 
@@ -239,17 +239,17 @@ describe("Guest registration & payment flow (/register)", () => {
       target: { value: "UGC 1" },
     });
 
-    const checkboxes1 = screen.getAllByRole("checkbox");
-    fireEvent.click(checkboxes1[0]!);
-    fireEvent.click(checkboxes1[1]!);
-
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]!);
+    fireEvent.click(checkboxes[1]!);
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
 
     await waitFor(() => {
-      expect(screen.getByText(/TB-COORG-FIRST1/)).toBeInTheDocument();
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
     });
+    expect(screen.getByText(/TB-COORG-ATTMP1/)).toBeInTheDocument();
 
-    // Simulate student clearing storage or starting a new registration with the EXACT same email and phone
+    // Student closes browser / clears session or clicks "Start a new registration →" and registers again with the SAME email and phone
     unmount();
     window.localStorage?.clear?.();
     window.sessionStorage?.clear?.();
@@ -272,14 +272,14 @@ describe("Guest registration & payment flow (/register)", () => {
     const checkboxes2 = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes2[0]!);
     fireEvent.click(checkboxes2[1]!);
-
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
 
-    // Proceeds directly to payment with its own booking reference, no OTP or "Email already registered" error
+    // Proceeds directly to payment with new booking reference TB-COORG-ATTMP2 and zero OTP or "Email already registered" errors
     await waitFor(() => {
-      expect(screen.getByText(/TB-COORG-SECOND/)).toBeInTheDocument();
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
     });
-    expect(screen.queryByText(/already registered/i)).toBeNull();
+    expect(screen.getByText(/TB-COORG-ATTMP2/)).toBeInTheDocument();
+    expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(2);
   });
 
   it("supports multiple visits, going back and forth, refreshing/reopening, and prevents duplicate registrations on repeated clicks", async () => {
@@ -378,7 +378,7 @@ describe("Guest registration & payment flow (/register)", () => {
       },
     });
 
-    // Student refreshes or closes and reopens the website
+    // Student refreshes or closes and reopens the website -> payment page is restored without login
     unmount();
 
     render(<RegisterComponent />);

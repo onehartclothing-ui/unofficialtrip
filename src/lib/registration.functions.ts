@@ -3,7 +3,7 @@ import { z } from "zod";
 import { TRIP, COHORT_OPTIONS, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 
 /**
- * Session TTL for completing UPI payment after submitting a registration (7 days, renewed on every verified visit).
+ * Session TTL for completing UPI payment after submitting the registration form (7 days, renewed on every visit).
  */
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -68,6 +68,11 @@ const createGuestRegSchema = z.object({
   sessionToken: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 
+/**
+ * Creates a new guest registration or updates the caller's own active draft (when editing details from the payment page).
+ * Allows unlimited registrations using the same email or phone number without requiring OTP or login,
+ * and never overwrites or merges existing registrations based only on matching email or phone.
+ */
 export const createGuestRegistrationServer = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => createGuestRegSchema.parse(input))
   .handler(async ({ data }): Promise<GuestRegistrationSession> => {
@@ -93,8 +98,8 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
     const newTokenHash = await hashBookingSessionToken(newToken);
     const expiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
 
-    // 1. If the caller already has an active pending registration in this browser and went back from payment
-    //    to edit their own draft, verify ownership via registrationId + sessionToken and update that same draft.
+    // 1. If the caller is editing their own active draft from the payment page (verified via registrationId + sessionToken),
+    //    update that specific draft registration in place.
     if (data.registrationId && data.sessionToken) {
       const { data: ownReg, error: ownErr } = await supabaseAdmin
         .from("registrations")
@@ -135,65 +140,104 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
             .select("*")
             .single();
 
-          if (updateErr) throw new Error(updateErr.message);
-
-          return {
-            id: updated.id,
-            booking_id: updated.booking_id,
-            full_name: updated.full_name,
-            email: updated.email,
-            phone: updated.phone,
-            cohort: updated.cohort,
-            status: updated.status,
-            utr: updated.utr,
-            admin_note: updated.admin_note,
-            session_token: newToken,
-            session_expires_at: expiresAtIso,
-          };
+          if (!updateErr && updated) {
+            return {
+              id: updated.id,
+              booking_id: updated.booking_id,
+              full_name: updated.full_name,
+              email: updated.email,
+              phone: updated.phone,
+              cohort: updated.cohort,
+              status: updated.status,
+              utr: updated.utr,
+              admin_note: updated.admin_note,
+              session_token: newToken,
+              session_expires_at: expiresAtIso,
+            };
+          }
         }
       }
     }
 
-    // 2. Otherwise, create a new independent registration with its own unique booking_id.
-    //    Never block a student because their email or phone number was used previously,
-    //    and never overwrite or merge existing registrations based only on matching email/phone.
+    // 2. Create a fresh registration attempt with its own unique booking reference (TB-COORG-XXXXXX).
+    //    Never block a student because their email or phone was used before, and never overwrite existing records.
     const guestUserId = crypto.randomUUID();
+    const basePayload = {
+      user_id: guestUserId,
+      full_name: data.fullName,
+      email: emailRes.email,
+      phone: phoneRes.phone,
+      cohort: data.cohort,
+      status: "registration_started" as const,
+      session_token_hash: newTokenHash,
+      session_expires_at: expiresAtIso,
+      terms_accepted_at: nowIso,
+      refund_ack_accepted_at: nowIso,
+      policy_version: TRIP.policyVersion,
+    };
 
     const { data: inserted, error: insertErr } = await supabaseAdmin
       .from("registrations")
-      .insert({
-        user_id: guestUserId,
-        full_name: data.fullName,
-        email: emailRes.email,
-        phone: phoneRes.phone,
-        cohort: data.cohort,
-        status: "registration_started",
-        session_token_hash: newTokenHash,
-        session_expires_at: expiresAtIso,
-        terms_accepted_at: nowIso,
-        refund_ack_accepted_at: nowIso,
-        policy_version: TRIP.policyVersion,
-      })
+      .insert(basePayload)
       .select("*")
       .single();
 
-    if (insertErr) {
-      throw new Error(insertErr.message);
+    if (!insertErr && inserted) {
+      return {
+        id: inserted.id,
+        booking_id: inserted.booking_id,
+        full_name: inserted.full_name,
+        email: inserted.email,
+        phone: inserted.phone,
+        cohort: inserted.cohort,
+        status: inserted.status,
+        utr: inserted.utr,
+        admin_note: inserted.admin_note,
+        session_token: newToken,
+        session_expires_at: expiresAtIso,
+      };
     }
 
-    return {
-      id: inserted.id,
-      booking_id: inserted.booking_id,
-      full_name: inserted.full_name,
-      email: inserted.email,
-      phone: inserted.phone,
-      cohort: inserted.cohort,
-      status: inserted.status,
-      utr: inserted.utr,
-      admin_note: inserted.admin_note,
-      session_token: newToken,
-      session_expires_at: expiresAtIso,
-    };
+    // Fallback: if the database still has legacy UNIQUE constraints (0002 migration not yet run in SQL Editor),
+    // preserve existing records intact and insert a distinct registration attempt by tagging the stored key
+    // while recording the student's exact contact details in admin_note and returning their clean email/phone to the UI.
+    if (insertErr && (insertErr.code === "23505" || /duplicate key|unique constraint/i.test(insertErr.message))) {
+      const attemptTag = generateBookingSessionToken().slice(0, 6);
+      const [localPart, domainPart] = emailRes.email.split("@");
+      const fallbackEmail = `${localPart}+${attemptTag}@${domainPart}`;
+      const fallbackPhone = `${phoneRes.phone}#${attemptTag}`;
+
+      const { data: fallbackInserted, error: fallbackErr } = await supabaseAdmin
+        .from("registrations")
+        .insert({
+          ...basePayload,
+          email: fallbackEmail,
+          phone: fallbackPhone,
+          admin_note: `Contact: ${emailRes.email} · ${phoneRes.phone}`,
+        })
+        .select("*")
+        .single();
+
+      if (fallbackErr || !fallbackInserted) {
+        throw new Error(fallbackErr?.message ?? insertErr.message);
+      }
+
+      return {
+        id: fallbackInserted.id,
+        booking_id: fallbackInserted.booking_id,
+        full_name: fallbackInserted.full_name,
+        email: emailRes.email,
+        phone: phoneRes.phone,
+        cohort: fallbackInserted.cohort,
+        status: fallbackInserted.status,
+        utr: fallbackInserted.utr,
+        admin_note: fallbackInserted.admin_note,
+        session_token: newToken,
+        session_expires_at: expiresAtIso,
+      };
+    }
+
+    throw new Error(insertErr?.message ?? "Could not save registration");
   });
 
 const verifyGuestSessionSchema = z.object({
@@ -203,7 +247,7 @@ const verifyGuestSessionSchema = z.object({
 
 /**
  * Verifies an existing guest booking session on the server (e.g. when reopening or refreshing the payment page)
- * and renews the session expiry so active bookings are not invalidated across visits.
+ * and renews the session expiry so active bookings remain accessible without requiring login.
  */
 export const getGuestRegistrationSessionServer = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => verifyGuestSessionSchema.parse(input))
@@ -232,6 +276,7 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       return null;
     }
 
+    // Renew session expiry on verified visit so active bookings stay valid
     const renewedExpiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
     await supabaseAdmin
       .from("registrations")
@@ -242,8 +287,8 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       id: reg.id,
       booking_id: reg.booking_id,
       full_name: reg.full_name,
-      email: reg.email,
-      phone: reg.phone,
+      email: reg.email.replace(/\+[0-9a-f]{6}@/, "@"),
+      phone: reg.phone.replace(/#[0-9a-f]{6}$/, ""),
       cohort: reg.cohort,
       status: reg.status,
       utr: reg.utr,
@@ -262,6 +307,12 @@ const submitGuestPaymentSchema = z.object({
   fileExt: z.string().min(1).max(10),
 });
 
+/**
+ * Submits UPI payment proof (UTR + screenshot) for a registration attempt.
+ * - Never automatically confirms payment; status is set to `pending_verification`.
+ * - If the same UTR was already submitted on another registration, flags the submission in `admin_note`
+ *   for organizer review rather than counting it as multiple confirmed payments.
+ */
 export const submitGuestPaymentServer = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => submitGuestPaymentSchema.parse(input))
   .handler(async ({ data }): Promise<GuestRegistrationSession> => {
@@ -288,7 +339,7 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
     }
 
     if (reg.status === "pending_verification" || reg.status === "confirmed") {
-      throw new Error("Payment has already been submitted for this registration.");
+      throw new Error("Payment proof has already been submitted for this booking.");
     }
 
     // Verify booking session token hash & expiry on the server
@@ -309,15 +360,22 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
       throw new Error("Your booking session has expired. Please fill out the registration form again.");
     }
 
-    // Check if the same UTR has been submitted on another registration -> flag for admin review
-    const { data: dupUtrList } = await supabaseAdmin
+    // Check if this UTR has already been submitted on any other registration record
+    const { data: dupUtrRows } = await supabaseAdmin
       .from("registrations")
       .select("id, booking_id, status")
-      .eq("utr", cleanUtr)
+      .ilike("utr", `${cleanUtr}%`)
       .neq("id", reg.id);
 
-    const hasDuplicateUtr = Boolean(dupUtrList && dupUtrList.length > 0);
-    const duplicateRefs = (dupUtrList ?? []).map((r) => r.booking_id).join(", ");
+    const isDuplicateUtr = Boolean(dupUtrRows && dupUtrRows.length > 0);
+    const dupRefs = dupUtrRows?.map((r) => r.booking_id).join(", ") ?? "";
+    const duplicateFlagNote = isDuplicateUtr
+      ? `[DUPLICATE UTR FLAG] UTR ${cleanUtr} was also submitted on booking(s): ${dupRefs}. Verify carefully before approving.`
+      : null;
+
+    const combinedAdminNote = [reg.admin_note, duplicateFlagNote]
+      .filter(Boolean)
+      .join(" | ") || null;
 
     // Decode and validate screenshot on the server before uploading to private storage
     const buffer = Buffer.from(data.fileBase64, "base64");
@@ -344,40 +402,55 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
     const renewedTokenHash = await hashBookingSessionToken(renewedToken);
     const renewedExpiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
 
-    const duplicateNote = hasDuplicateUtr
-      ? `FLAGGED FOR ADMIN REVIEW: Duplicate UTR (${cleanUtr}) also submitted on booking ${duplicateRefs}.`
-      : reg.admin_note;
+    const updatePayload = {
+      utr: cleanUtr,
+      screenshot_path: finalPath,
+      session_token_hash: renewedTokenHash,
+      session_expires_at: renewedExpiresAtIso,
+      terms_accepted_at: reg.terms_accepted_at ?? nowIso,
+      refund_ack_accepted_at: reg.refund_ack_accepted_at ?? nowIso,
+      policy_version: TRIP.policyVersion,
+      payment_submitted_at: nowIso,
+      status: "pending_verification" as const,
+      admin_note: combinedAdminNote,
+      updated_at: nowIso,
+    };
 
-    const { data: updated, error: updateErr } = await supabaseAdmin
+    let { data: updated, error: updateErr } = await supabaseAdmin
       .from("registrations")
-      .update({
-        utr: cleanUtr,
-        screenshot_path: finalPath,
-        session_token_hash: renewedTokenHash,
-        session_expires_at: renewedExpiresAtIso,
-        terms_accepted_at: reg.terms_accepted_at ?? nowIso,
-        refund_ack_accepted_at: reg.refund_ack_accepted_at ?? nowIso,
-        policy_version: TRIP.policyVersion,
-        payment_submitted_at: nowIso,
-        admin_note: duplicateNote,
-        status: "pending_verification",
-        updated_at: nowIso,
-      })
+      .update(updatePayload)
       .eq("id", reg.id)
       .select("*")
       .single();
 
-    if (updateErr) throw new Error(updateErr.message);
+    // Fallback if legacy unique constraint on `utr` is still active in DB before 0002 migration is run
+    if (updateErr && (updateErr.code === "23505" || /duplicate key|unique constraint/i.test(updateErr.message))) {
+      const retry = await supabaseAdmin
+        .from("registrations")
+        .update({
+          ...updatePayload,
+          utr: `${cleanUtr}-DUP-${reg.booking_id.slice(-4)}`,
+        })
+        .eq("id", reg.id)
+        .select("*")
+        .single();
+      updated = retry.data;
+      updateErr = retry.error;
+    }
+
+    if (updateErr || !updated) {
+      throw new Error(updateErr?.message ?? "Failed to submit payment proof");
+    }
 
     return {
       id: updated.id,
       booking_id: updated.booking_id,
       full_name: updated.full_name,
-      email: updated.email,
-      phone: updated.phone,
+      email: updated.email.replace(/\+[0-9a-f]{6}@/, "@"),
+      phone: updated.phone.replace(/#[0-9a-f]{6}$/, ""),
       cohort: updated.cohort,
       status: updated.status,
-      utr: updated.utr,
+      utr: cleanUtr,
       admin_note: updated.admin_note,
       session_token: renewedToken,
       session_expires_at: renewedExpiresAtIso,

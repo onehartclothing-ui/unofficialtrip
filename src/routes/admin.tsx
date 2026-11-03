@@ -151,10 +151,9 @@ function AdminPage() {
   const utrCounts = useMemo(() => {
     const map = new Map<string, number>();
     for (const r of rows) {
-      if (r.utr) {
-        const key = r.utr.trim().toUpperCase();
-        map.set(key, (map.get(key) ?? 0) + 1);
-      }
+      if (!r.utr) continue;
+      const baseUtr = r.utr.replace(/-DUP-[A-Z0-9]+$/i, "").trim().toUpperCase();
+      map.set(baseUtr, (map.get(baseUtr) ?? 0) + 1);
     }
     return map;
   }, [rows]);
@@ -170,8 +169,8 @@ function AdminPage() {
           </button>
         </div>
       </div>
-      <div className="mt-6 grid grid-cols-3 gap-3">
-        {([["Pending", "pending_verification"], ["Confirmed", "confirmed"], ["Review", "rejected"]] as const).map(([l, s]) => (
+      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {([["Pending Payment Proof", "pending_verification"], ["Verified Payments", "confirmed"], ["Needs Review", "rejected"], ["Form Started (Unpaid)", "registration_started"]] as const).map(([l, s]) => (
           <div key={s} className="rounded-lg border border-border bg-card p-4"><p className="eyebrow text-muted-foreground">{l}</p><p className="font-display mt-1 text-4xl">{count(s)}</p></div>
         ))}
       </div>
@@ -184,31 +183,39 @@ function AdminPage() {
       </div>
       <div className="mt-6 space-y-3">
         {shown.length === 0 && <p className="text-muted-foreground">Nothing here.</p>}
-        {shown.map((r) => (
+        {shown.map((r) => {
+          const baseUtr = r.utr ? r.utr.replace(/-DUP-[A-Z0-9]+$/i, "").trim().toUpperCase() : null;
+          const isDupUtr = Boolean(
+            (baseUtr && (utrCounts.get(baseUtr) ?? 0) > 1) ||
+            (r.admin_note && r.admin_note.includes("[DUPLICATE UTR FLAG]"))
+          );
+          return (
           <div key={r.id} className="rounded-lg border border-border bg-card p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-lg font-medium">{r.full_name}</p>
                 <p className="text-sm text-muted-foreground">
-                  {r.email} · {r.phone}{r.cohort ? ` · ${r.cohort}` : ""}
+                  {r.email.replace(/\+[0-9a-f]{6}@/, "@")} · {r.phone.replace(/#[0-9a-f]{6}$/, "")}{r.cohort ? ` · ${r.cohort}` : ""}
                 </p>
                 <p className="mt-1 font-mono text-xs text-muted-foreground">{r.booking_id}</p>
               </div>
-              <span className="eyebrow rounded-full border border-border px-3 py-1">{STATUS_LABEL[r.status] ?? r.status}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {isDupUtr && (
+                  <span className="eyebrow rounded-full border border-amber px-3 py-1 text-amber">
+                    Duplicate UTR — Review
+                  </span>
+                )}
+                <span className="eyebrow rounded-full border border-border px-3 py-1">{STATUS_LABEL[r.status] ?? r.status}</span>
+              </div>
             </div>
             {r.utr && (
               <div className="mt-4 flex flex-wrap items-center gap-4 text-sm">
-                <span>UTR: <span className="font-mono">{r.utr}</span></span>
-                {(utrCounts.get(r.utr.trim().toUpperCase()) ?? 0) > 1 && (
-                  <span className="eyebrow rounded-full border border-destructive px-2.5 py-0.5 text-destructive">
-                    Duplicate UTR ({utrCounts.get(r.utr.trim().toUpperCase())}x) — Review
-                  </span>
-                )}
+                <span>UTR: <span className="font-mono">{baseUtr ?? r.utr}</span></span>
                 {r.screenshot_path && <button onClick={() => viewShot(r.screenshot_path!)} className="underline">View screenshot</button>}
                 {r.payment_submitted_at && <span className="text-muted-foreground">{new Date(r.payment_submitted_at).toLocaleString("en-IN")}</span>}
               </div>
             )}
-            {r.admin_note && <p className="mt-2 text-sm text-muted-foreground">Note: {r.admin_note}</p>}
+            {r.admin_note && <p className="mt-2 text-sm text-amber">{r.admin_note}</p>}
             {r.status === "pending_verification" && (
               <div className="mt-4 flex gap-3">
                 <button onClick={() => setStatus(r, "confirmed")} className="rounded-full bg-ember px-5 py-2.5 font-display text-ink">Approve payment</button>
@@ -216,7 +223,8 @@ function AdminPage() {
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
       <p className="mt-8 text-xs text-muted-foreground">Only approve after checking your bank/UPI app shows ₹8,500 received for this UTR. A screenshot alone is not proof.</p>
     </Wrap>

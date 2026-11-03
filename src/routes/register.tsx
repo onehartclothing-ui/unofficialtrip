@@ -258,8 +258,8 @@ function DetailsStep({
       return;
     }
 
-    // If the student already has an active, unexpired registration session and hasn't changed any of the 4 fields,
-    // reuse the existing pending registration immediately without creating a duplicate database request.
+    // If the student went back from the payment page and hasn't changed any of the 4 fields,
+    // return directly to their active payment screen without creating a duplicate database request.
     const isUnchangedDraft =
       initial &&
       initial.status !== "pending_verification" &&
@@ -856,11 +856,7 @@ function Confirmed({
           </div>
         </dl>
       </div>
-      <button
-        type="button"
-        onClick={() => downloadConfirmation(reg)}
-        className={`${primaryBtn} mt-8`}
-      >
+      <button type="button" onClick={() => downloadConfirmation(reg)} className={`${primaryBtn} mt-8`}>
         Download confirmation
       </button>
       <button

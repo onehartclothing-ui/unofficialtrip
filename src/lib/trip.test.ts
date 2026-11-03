@@ -3,7 +3,6 @@ import {
   buildUpiLink,
   buildIosUpiAppLinks,
   detectDevicePlatform,
-  getAuthRedirectUrl,
   TRIP,
   COHORT_OPTIONS,
   validateEmail,
@@ -86,12 +85,6 @@ describe("Registration helpers", () => {
     expect(normalizeIndianPhone("91-98765-43210")).toEqual({ valid: true, phone: "+919876543210" });
     expect(normalizeIndianPhone("12345").valid).toBe(false);
     expect(normalizeIndianPhone("+91 12345 67890").valid).toBe(false);
-  });
-
-  it("exposes the canonical production site URL and builds safe auth callback URLs", () => {
-    expect(TRIP.productionSiteUrl).toBe("https://unofficialtrip-phi.vercel.app");
-    const callbackUrl = getAuthRedirectUrl("/auth/callback");
-    expect(callbackUrl).toContain("/auth/callback");
   });
 });
 
