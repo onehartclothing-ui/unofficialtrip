@@ -22,8 +22,8 @@ describe("UPI link", () => {
 describe("Registration helpers", () => {
   it("exposes configurable cohort options", () => {
     expect(COHORT_OPTIONS.length).toBeGreaterThan(0);
-    expect(COHORT_OPTIONS).toContain("Section A");
-    expect(COHORT_OPTIONS).toContain("Section B");
+    expect(COHORT_OPTIONS).toContain("UGC 1");
+    expect(COHORT_OPTIONS).toContain("UGC 2");
   });
 
   it("validates email format", () => {

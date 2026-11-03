@@ -67,7 +67,7 @@ describe("Guest registration & payment flow (/register)", () => {
       full_name: "Aarav Sharma",
       email: "aarav@mesabusinessschool.org",
       phone: "+919876543210",
-      cohort: "Section A",
+      cohort: "UGC 1",
       status: "registration_started",
       utr: null,
       session_token: sessionToken,
@@ -105,7 +105,7 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.change(nameInput, { target: { value: "Aarav Sharma" } });
     fireEvent.change(emailInput, { target: { value: "aarav@mesabusinessschool.org" } });
     fireEvent.change(phoneInput, { target: { value: "+91 98765 43210" } });
-    fireEvent.change(cohortSelect, { target: { value: "Section A" } });
+    fireEvent.change(cohortSelect, { target: { value: "UGC 1" } });
 
     // 4. Accept mandatory checkboxes
     const checkboxes = screen.getAllByRole("checkbox");
@@ -127,7 +127,7 @@ describe("Guest registration & payment flow (/register)", () => {
         fullName: "Aarav Sharma",
         email: "aarav@mesabusinessschool.org",
         phone: "+919876543210",
-        cohort: "Section A",
+        cohort: "UGC 1",
         sessionToken: undefined,
       },
     });

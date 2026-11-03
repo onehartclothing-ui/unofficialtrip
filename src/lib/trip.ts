@@ -10,7 +10,7 @@ export const TRIP = {
 } as const;
 
 /** Configurable cohort options for registration dropdown. */
-export const COHORT_OPTIONS = ["Section A", "Section B"] as const;
+export const COHORT_OPTIONS = ["UGC 1", "UGC 2"] as const;
 
 /**
  * Configurable allowed email domains (lowercase).
