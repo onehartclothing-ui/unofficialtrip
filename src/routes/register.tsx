@@ -1,16 +1,75 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { PageShell } from "@/components/site/PageShell";
 import { TRIP, COHORT_OPTIONS, buildUpiLink, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 import upiQr from "@/assets/upi-qr.jpg";
 import {
   createGuestRegistrationServer,
+  getGuestRegistrationSessionServer,
   submitGuestPaymentServer,
   type GuestRegistrationSession,
 } from "@/lib/registration.functions";
 
 const SESSION_KEY = "titu_coorg2026_reg_v2";
+
+function getStorages(): Storage[] {
+  const list: Storage[] = [];
+  try {
+    if (typeof window !== "undefined" && window.localStorage && typeof window.localStorage.getItem === "function") {
+      list.push(window.localStorage);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  try {
+    if (typeof window !== "undefined" && window.sessionStorage && typeof window.sessionStorage.getItem === "function") {
+      list.push(window.sessionStorage);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return list;
+}
+
+function loadStoredSession(): GuestRegistrationSession | null {
+  for (const storage of getStorages()) {
+    try {
+      const raw = storage.getItem(SESSION_KEY);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as GuestRegistrationSession;
+      if (!parsed || !parsed.id || !parsed.booking_id) continue;
+
+      const isSubmitted =
+        parsed.status === "pending_verification" || parsed.status === "confirmed";
+      const isNotExpired =
+        parsed.session_expires_at &&
+        new Date(parsed.session_expires_at).getTime() > Date.now() &&
+        /^[0-9a-f]{64}$/.test(parsed.session_token ?? "");
+
+      if (isSubmitted || isNotExpired) {
+        return parsed;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+  return null;
+}
+
+function saveStoredSession(next: GuestRegistrationSession | null) {
+  for (const storage of getStorages()) {
+    try {
+      if (next) {
+        storage.setItem(SESSION_KEY, JSON.stringify(next));
+      } else {
+        storage.removeItem(SESSION_KEY);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+}
 
 export const Route = createFileRoute("/register")({
   head: () => ({
@@ -30,8 +89,6 @@ const input =
   "w-full rounded-md border border-input bg-transparent px-4 py-3.5 text-base text-bone placeholder:text-muted-foreground focus:border-ember focus:outline-none";
 const primaryBtn =
   "w-full rounded-full bg-ember px-6 py-4 font-display text-xl text-ink transition-opacity disabled:opacity-40";
-const ghostBtn =
-  "w-full rounded-full border border-border px-6 py-4 font-display text-lg text-bone hover:border-bone";
 const errMsg = (e: unknown) =>
   e instanceof Error ? e.message : (e as { message?: string })?.message ?? "Something went wrong";
 
@@ -54,27 +111,35 @@ function RegisterPage() {
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    try {
-      const saved = sessionStorage.getItem(SESSION_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved) as GuestRegistrationSession;
-        if (parsed && parsed.id && parsed.booking_id) {
-          // If the saved session is still awaiting payment, ensure its session token hasn't expired
-          const isSubmitted =
-            parsed.status === "pending_verification" || parsed.status === "confirmed";
-          const isNotExpired =
-            parsed.session_expires_at &&
-            new Date(parsed.session_expires_at).getTime() > Date.now() &&
-            /^[0-9a-f]{64}$/.test(parsed.session_token ?? "");
-          if (isSubmitted || isNotExpired) {
-            setReg(parsed);
-          } else {
-            sessionStorage.removeItem(SESSION_KEY);
-          }
-        }
+    const saved = loadStoredSession();
+    if (saved) {
+      setReg(saved);
+      // Persist across both storages so refreshing, closing, and reopening always resumes cleanly
+      saveStoredSession(saved);
+      // Background-verify active pending session with the server if a session token is present
+      if (
+        saved.status !== "pending_verification" &&
+        saved.status !== "confirmed" &&
+        /^[0-9a-f]{64}$/.test(saved.session_token ?? "")
+      ) {
+        void getGuestRegistrationSessionServer({
+          data: {
+            registrationId: saved.id,
+            sessionToken: saved.session_token,
+          },
+        })
+          .then((fresh) => {
+            if (fresh) {
+              setReg(fresh);
+              saveStoredSession(fresh);
+            }
+          })
+          .catch(() => {
+            // Keep local session if offline or transient error
+          });
       }
-    } catch {
-      // Ignore storage errors
+    } else {
+      saveStoredSession(null);
     }
     setHydrated(true);
   }, []);
@@ -82,15 +147,7 @@ function RegisterPage() {
   function updateReg(next: GuestRegistrationSession | null) {
     setReg(next);
     setEditingDraft(false);
-    try {
-      if (next) {
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
-      } else {
-        sessionStorage.removeItem(SESSION_KEY);
-      }
-    } catch {
-      // Ignore storage errors
-    }
+    saveStoredSession(next);
   }
 
   if (!hydrated) {
@@ -104,7 +161,16 @@ function RegisterPage() {
   return (
     <PageShell>
       {!reg || editingDraft ? (
-        <DetailsStep initial={reg} onDone={updateReg} />
+        <DetailsStep
+          initial={reg}
+          onDone={updateReg}
+          onResumePayment={
+            reg && reg.status !== "pending_verification" && reg.status !== "confirmed"
+              ? () => setEditingDraft(false)
+              : undefined
+          }
+          onStartFresh={reg ? () => updateReg(null) : undefined}
+        />
       ) : reg.status === "pending_verification" || reg.status === "confirmed" ? (
         <Submitted reg={reg} onReset={() => updateReg(null)} />
       ) : (
@@ -112,6 +178,7 @@ function RegisterPage() {
           reg={reg}
           onDone={updateReg}
           onBack={() => setEditingDraft(true)}
+          onStartFresh={() => updateReg(null)}
         />
       )}
     </PageShell>
@@ -121,9 +188,13 @@ function RegisterPage() {
 function DetailsStep({
   initial,
   onDone,
+  onResumePayment,
+  onStartFresh,
 }: {
   initial: GuestRegistrationSession | null;
   onDone: (r: GuestRegistrationSession) => void;
+  onResumePayment?: () => void;
+  onStartFresh?: () => void;
 }) {
   const [fullName, setFullName] = useState(initial?.full_name ?? "");
   const [email, setEmail] = useState(initial?.email ?? "");
@@ -132,9 +203,11 @@ function DetailsStep({
   const [terms, setTerms] = useState(Boolean(initial));
   const [refund, setRefund] = useState(Boolean(initial));
   const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current || busy) return;
 
     const trimmedName = fullName.trim();
     if (trimmedName.length < 2) {
@@ -164,24 +237,45 @@ function DetailsStep({
       return;
     }
 
+    // If the student already has an active, unexpired registration session and hasn't changed any of the 4 fields,
+    // reuse the existing pending registration immediately without creating a duplicate database request.
+    const isUnchangedDraft =
+      initial &&
+      initial.status !== "pending_verification" &&
+      initial.status !== "confirmed" &&
+      initial.full_name === trimmedName &&
+      initial.email === emailCheck.email &&
+      initial.phone === phoneCheck.phone &&
+      initial.cohort === cohort &&
+      initial.session_expires_at &&
+      new Date(initial.session_expires_at).getTime() > Date.now() &&
+      /^[0-9a-f]{64}$/.test(initial.session_token ?? "");
+
+    if (isUnchangedDraft && initial) {
+      onDone(initial);
+      return;
+    }
+
+    submittingRef.current = true;
     setBusy(true);
     try {
+      const hasValidSessionToken =
+        initial?.session_token && /^[0-9a-f]{64}$/.test(initial.session_token);
       const serverSession = await createGuestRegistrationServer({
         data: {
           fullName: trimmedName,
           email: emailCheck.email,
           phone: phoneCheck.phone,
           cohort,
-          sessionToken:
-            initial?.session_token && /^[0-9a-f]{64}$/.test(initial.session_token)
-              ? initial.session_token
-              : undefined,
+          registrationId: hasValidSessionToken ? initial.id : undefined,
+          sessionToken: hasValidSessionToken ? initial.session_token : undefined,
         },
       });
       onDone(serverSession);
     } catch (err) {
       toast.error(errMsg(err));
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   }
@@ -191,6 +285,35 @@ function DetailsStep({
       <p className="eyebrow text-ember">Step 1 of 2 · Registration</p>
       <h1 className="font-display mt-3 text-6xl md:text-8xl">Count me in.</h1>
       <p className="mt-3 text-bone/80">Fill in your details below to proceed to payment.</p>
+
+      {initial && onResumePayment && (
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-4 text-sm">
+          <div>
+            <p className="eyebrow text-ember">Pending registration · {initial.booking_id}</p>
+            <p className="mt-1 text-bone/80">
+              Update your details below or return directly to the payment screen.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={onResumePayment}
+              className="rounded-full bg-ember px-4 py-2 font-display text-sm text-ink"
+            >
+              Return to payment →
+            </button>
+            {onStartFresh && (
+              <button
+                type="button"
+                onClick={onStartFresh}
+                className="eyebrow text-muted-foreground hover:text-bone"
+              >
+                Start new
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <form onSubmit={submit} className="mt-8 space-y-5">
         <label className="block">
@@ -309,16 +432,19 @@ function PaymentStep({
   reg,
   onDone,
   onBack,
+  onStartFresh,
 }: {
   reg: GuestRegistrationSession;
   onDone: (r: GuestRegistrationSession) => void;
   onBack: () => void;
+  onStartFresh: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [utr, setUtr] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
 
   async function copy() {
     try {
@@ -332,6 +458,8 @@ function PaymentStep({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current || busy) return;
+
     const cleanedUtr = utr.replace(/\s+/g, "").toUpperCase();
     if (!/^[A-Z0-9]{8,30}$/.test(cleanedUtr)) {
       toast.error("Please enter a valid UPI Transaction ID / UTR (8–30 alphanumeric characters)");
@@ -350,6 +478,7 @@ function PaymentStep({
       return;
     }
 
+    submittingRef.current = true;
     setBusy(true);
     try {
       const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
@@ -368,6 +497,7 @@ function PaymentStep({
     } catch (e) {
       toast.error(errMsg(e));
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   }
@@ -469,13 +599,22 @@ function PaymentStep({
         </button>
       </form>
 
-      <button
-        type="button"
-        onClick={onBack}
-        className="eyebrow mt-8 text-muted-foreground hover:text-bone"
-      >
-        ← Edit registration details
-      </button>
+      <div className="mt-8 flex flex-wrap items-center justify-between gap-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="eyebrow text-muted-foreground hover:text-bone"
+        >
+          ← Edit registration details
+        </button>
+        <button
+          type="button"
+          onClick={onStartFresh}
+          className="eyebrow text-muted-foreground hover:text-bone"
+        >
+          Start a new registration →
+        </button>
+      </div>
     </div>
   );
 }

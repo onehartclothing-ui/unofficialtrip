@@ -8,6 +8,7 @@ import {
 } from "@/lib/registration.functions";
 
 const mockCreateGuestRegistrationServer = vi.fn();
+const mockGetGuestRegistrationSessionServer = vi.fn();
 const mockSubmitGuestPaymentServer = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
@@ -24,6 +25,7 @@ vi.mock("@/lib/registration.functions", async (importOriginal) => {
   return {
     ...actual,
     createGuestRegistrationServer: (...args: unknown[]) => mockCreateGuestRegistrationServer(...args),
+    getGuestRegistrationSessionServer: (...args: unknown[]) => mockGetGuestRegistrationSessionServer(...args),
     submitGuestPaymentServer: (...args: unknown[]) => mockSubmitGuestPaymentServer(...args),
   };
 });
@@ -52,8 +54,10 @@ describe("Guest registration & payment flow (/register)", () => {
   const RegisterComponent = (RegisterRoute as unknown as { component: React.ComponentType }).component;
 
   beforeEach(() => {
-    sessionStorage.clear();
+    window.localStorage?.clear?.();
+    window.sessionStorage?.clear?.();
     mockCreateGuestRegistrationServer.mockReset();
+    mockGetGuestRegistrationSessionServer.mockReset();
     mockSubmitGuestPaymentServer.mockReset();
   });
 
@@ -128,6 +132,7 @@ describe("Guest registration & payment flow (/register)", () => {
         email: "aarav@mesabusinessschool.org",
         phone: "+919876543210",
         cohort: "UGC 1",
+        registrationId: undefined,
         sessionToken: undefined,
       },
     });
@@ -176,5 +181,118 @@ describe("Guest registration & payment flow (/register)", () => {
     expect(screen.getByText("Pending verification")).toBeInTheDocument();
     expect(screen.getByText("TB-COORG-TEST99")).toBeInTheDocument();
     expect(screen.getByText("431298765432")).toBeInTheDocument();
+  });
+
+  it("supports multiple visits, going back and forth, refreshing/reopening, and prevents duplicate registrations on repeated clicks", async () => {
+    const token1 = "b".repeat(64);
+    const token2 = "c".repeat(64);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    const session1 = {
+      id: "11111111-1111-4111-8111-111111111111",
+      booking_id: "TB-COORG-MULTI1",
+      full_name: "Riya Patel",
+      email: "riya@mesabusinessschool.org",
+      phone: "+919876543211",
+      cohort: "UGC 1",
+      status: "registration_started",
+      utr: null,
+      session_token: token1,
+      session_expires_at: expiresAt,
+    };
+
+    const session2 = {
+      ...session1,
+      cohort: "UGC 2",
+      session_token: token2,
+    };
+
+    // Delay first resolution slightly to test double-click protection
+    mockCreateGuestRegistrationServer
+      .mockImplementationOnce(
+        () => new Promise((resolve) => setTimeout(() => resolve(session1), 30)),
+      )
+      .mockResolvedValueOnce(session2);
+
+    mockGetGuestRegistrationSessionServer.mockResolvedValue(session2);
+
+    const { unmount } = render(<RegisterComponent />);
+
+    fireEvent.change(screen.getByPlaceholderText("Your full name"), {
+      target: { value: "Riya Patel" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("you@mesabusinessschool.org"), {
+      target: { value: "riya@mesabusinessschool.org" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("+91 98765 43210"), {
+      target: { value: "+91 98765 43211" },
+    });
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "UGC 1" },
+    });
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]!);
+    fireEvent.click(checkboxes[1]!);
+
+    const continueBtn = screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" });
+
+    // Scenario 6: Rapidly click Submit multiple times -> only 1 server call is made
+    fireEvent.click(continueBtn);
+    fireEvent.click(continueBtn);
+    fireEvent.click(continueBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+    });
+    expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(1);
+
+    // Scenario 4: Go back from payment to registration
+    fireEvent.click(screen.getByRole("button", { name: /Edit registration details/i }));
+    expect(screen.getByDisplayValue("Riya Patel")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("riya@mesabusinessschool.org")).toBeInTheDocument();
+
+    // Scenario 1 & 2: Go back to payment without changing details -> reuses same pending registration without extra server call
+    fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
+    await waitFor(() => {
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+    });
+    expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(1);
+
+    // Go back again and edit cohort from UGC 1 -> UGC 2 -> updates the SAME registration ID using sessionToken
+    fireEvent.click(screen.getByRole("button", { name: /Edit registration details/i }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "UGC 2" } });
+    fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+    });
+    expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(2);
+    expect(mockCreateGuestRegistrationServer).toHaveBeenLastCalledWith({
+      data: {
+        fullName: "Riya Patel",
+        email: "riya@mesabusinessschool.org",
+        phone: "+919876543211",
+        cohort: "UGC 2",
+        registrationId: session1.id,
+        sessionToken: token1,
+      },
+    });
+
+    // Scenario 3 & 5 & 7: Student refreshes or closes and reopens the website
+    unmount();
+
+    render(<RegisterComponent />);
+
+    await waitFor(() => {
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/TB-COORG-MULTI1/)).toBeInTheDocument();
+    expect(mockGetGuestRegistrationSessionServer).toHaveBeenCalledWith({
+      data: {
+        registrationId: session2.id,
+        sessionToken: token2,
+      },
+    });
   });
 });

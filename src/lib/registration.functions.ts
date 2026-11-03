@@ -3,9 +3,9 @@ import { z } from "zod";
 import { TRIP, COHORT_OPTIONS, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 
 /**
- * Session TTL for completing UPI payment after submitting the registration form (2 hours).
+ * Session TTL for completing UPI payment after submitting the registration form (24 hours).
  */
-export const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type GuestRegistrationSession = {
   id: string;
@@ -63,6 +63,7 @@ const createGuestRegSchema = z.object({
   email: z.string().trim().max(255),
   phone: z.string().trim().min(10).max(20),
   cohort: z.string().trim().min(1, "Please select your cohort").max(100),
+  registrationId: z.string().uuid().optional(),
   sessionToken: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 
@@ -85,7 +86,88 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    // Check if an existing registration matches this email or phone
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const newToken = generateBookingSessionToken();
+    const newTokenHash = await hashBookingSessionToken(newToken);
+    const expiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+
+    // 1. If the caller already has an active session in this browser (e.g. went back from payment to edit details),
+    //    verify ownership via their registrationId + sessionToken first so they can freely edit their name, email, phone, or cohort.
+    if (data.registrationId && data.sessionToken) {
+      const { data: ownReg, error: ownErr } = await supabaseAdmin
+        .from("registrations")
+        .select("*")
+        .eq("id", data.registrationId)
+        .maybeSingle();
+
+      if (ownErr) throw new Error(ownErr.message);
+
+      if (ownReg) {
+        const callerHash = await hashBookingSessionToken(data.sessionToken);
+        const isExpired =
+          !ownReg.session_expires_at ||
+          new Date(ownReg.session_expires_at).getTime() <= now.getTime();
+
+        if (
+          ownReg.session_token_hash &&
+          !isExpired &&
+          constantTimeEqualHex(ownReg.session_token_hash, callerHash) &&
+          ownReg.status !== "pending_verification" &&
+          ownReg.status !== "confirmed"
+        ) {
+          // Ensure their edited email or phone does not collide with a DIFFERENT registration record
+          const { data: conflicts, error: conflictErr } = await supabaseAdmin
+            .from("registrations")
+            .select("id, booking_id, status")
+            .or(`email.eq.${emailRes.email},phone.eq.${phoneRes.phone}`)
+            .neq("id", ownReg.id);
+
+          if (conflictErr) throw new Error(conflictErr.message);
+
+          if (conflicts && conflicts.length > 0) {
+            throw new Error(
+              "An active or completed registration already exists with this email or phone number.",
+            );
+          }
+
+          const { data: updated, error: updateErr } = await supabaseAdmin
+            .from("registrations")
+            .update({
+              full_name: data.fullName,
+              email: emailRes.email,
+              phone: phoneRes.phone,
+              cohort: data.cohort,
+              session_token_hash: newTokenHash,
+              session_expires_at: expiresAtIso,
+              terms_accepted_at: nowIso,
+              refund_ack_accepted_at: nowIso,
+              policy_version: TRIP.policyVersion,
+              updated_at: nowIso,
+            })
+            .eq("id", ownReg.id)
+            .select("*")
+            .single();
+
+          if (updateErr) throw new Error(updateErr.message);
+
+          return {
+            id: updated.id,
+            booking_id: updated.booking_id,
+            full_name: updated.full_name,
+            email: updated.email,
+            phone: updated.phone,
+            cohort: updated.cohort,
+            status: updated.status,
+            utr: updated.utr,
+            session_token: newToken,
+            session_expires_at: expiresAtIso,
+          };
+        }
+      }
+    }
+
+    // 2. Otherwise check if an existing registration matches this email or phone
     const { data: existingList, error: findErr } = await supabaseAdmin
       .from("registrations")
       .select("*")
@@ -94,12 +176,6 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
     if (findErr) {
       throw new Error(findErr.message);
     }
-
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const newToken = generateBookingSessionToken();
-    const newTokenHash = await hashBookingSessionToken(newToken);
-    const expiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
 
     if (existingList && existingList.length > 0) {
       // NEVER allow an unauthenticated caller to modify an existing registration
@@ -204,6 +280,71 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
       utr: inserted.utr,
       session_token: newToken,
       session_expires_at: expiresAtIso,
+    };
+  });
+
+const verifyGuestSessionSchema = z.object({
+  registrationId: z.string().uuid(),
+  sessionToken: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
+/**
+ * Verifies an existing guest booking session on the server (e.g. when reopening or refreshing the website)
+ * without creating duplicate registrations or exposing other students' data.
+ */
+export const getGuestRegistrationSessionServer = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => verifyGuestSessionSchema.parse(input))
+  .handler(async ({ data }): Promise<GuestRegistrationSession | null> => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: reg, error } = await supabaseAdmin
+      .from("registrations")
+      .select("*")
+      .eq("id", data.registrationId)
+      .maybeSingle();
+
+    if (error || !reg) return null;
+
+    if (reg.status === "pending_verification" || reg.status === "confirmed") {
+      return {
+        id: reg.id,
+        booking_id: reg.booking_id,
+        full_name: reg.full_name,
+        email: reg.email,
+        phone: reg.phone,
+        cohort: reg.cohort,
+        status: reg.status,
+        utr: reg.utr,
+        session_token: "",
+        session_expires_at: reg.updated_at,
+      };
+    }
+
+    const now = new Date();
+    const callerHash = await hashBookingSessionToken(data.sessionToken);
+    const isExpired =
+      !reg.session_expires_at ||
+      new Date(reg.session_expires_at).getTime() <= now.getTime();
+
+    if (
+      !reg.session_token_hash ||
+      isExpired ||
+      !constantTimeEqualHex(reg.session_token_hash, callerHash)
+    ) {
+      return null;
+    }
+
+    return {
+      id: reg.id,
+      booking_id: reg.booking_id,
+      full_name: reg.full_name,
+      email: reg.email,
+      phone: reg.phone,
+      cohort: reg.cohort,
+      status: reg.status,
+      utr: reg.utr,
+      session_token: data.sessionToken,
+      session_expires_at: reg.session_expires_at!,
     };
   });
 
