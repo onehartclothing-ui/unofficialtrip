@@ -349,8 +349,12 @@ describe("Guest registration & payment flow (/register)", () => {
     mockCheckRegistrationEmailExistsServer.mockResolvedValue({ exists: true });
     mockSignInWithOtp.mockResolvedValue({ data: {}, error: null });
 
-    // First verification attempt with wrong OTP fails (unauthorized user cannot access someone else's booking)
+    // First verification attempt with wrong OTP fails (both 'email' and 'signup' OTP types return error)
     mockVerifyOtp
+      .mockResolvedValueOnce({
+        data: { session: null },
+        error: new Error("Token has expired or is invalid"),
+      })
       .mockResolvedValueOnce({
         data: { session: null },
         error: new Error("Token has expired or is invalid"),
@@ -429,7 +433,7 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.click(screen.getByRole("button", { name: "VERIFY & CONTINUE BOOKING →" }));
 
     await waitFor(() => {
-      expect(mockVerifyOtp).toHaveBeenCalledTimes(1);
+      expect(mockVerifyOtp).toHaveBeenCalledTimes(2);
     });
     expect(mockResumeRegistrationByVerifiedEmailServer).not.toHaveBeenCalled();
     expect(screen.queryByText("SCAN TO PAY")).toBeNull();

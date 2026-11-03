@@ -352,8 +352,9 @@ const checkRegistrationEmailSchema = z.object({
 });
 
 /**
- * Checks whether a registration exists for the given email without leaking any PII or booking details.
- * Used before sending a Supabase Auth email OTP / magic link to a returning student.
+ * Checks whether a registration exists for the given email without leaking any PII or booking details,
+ * and ensures a pre-confirmed Supabase Auth user exists for that email so `supabase.auth.signInWithOtp`
+ * always uses the Magic Link / OTP Login template instead of the first-time "Confirm your signup" template.
  */
 export const checkRegistrationEmailExistsServer = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => checkRegistrationEmailSchema.parse(input))
@@ -374,7 +375,38 @@ export const checkRegistrationEmailExistsServer = createServerFn({ method: "POST
       throw new Error(error.message);
     }
 
-    return { exists: Boolean(reg) };
+    if (!reg) {
+      return { exists: false };
+    }
+
+    // Ensure the returning student has a pre-confirmed auth.users entry so Supabase Auth
+    // sends the Login OTP / Magic Link email rather than the "Confirm your signup" email.
+    try {
+      const { error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
+        email: emailRes.email,
+        email_confirm: true,
+      });
+
+      if (createAuthErr && /already|exists|registered/i.test(createAuthErr.message)) {
+        // User already exists in auth.users; ensure their email_confirm is true in case a previous unconfirmed signup occurred
+        const { data: listData } = await supabaseAdmin.auth.admin.listUsers({
+          page: 1,
+          perPage: 200,
+        });
+        const existingAuthUser = listData?.users?.find(
+          (u) => u.email?.toLowerCase() === emailRes.email,
+        );
+        if (existingAuthUser && !existingAuthUser.email_confirmed_at) {
+          await supabaseAdmin.auth.admin.updateUserById(existingAuthUser.id, {
+            email_confirm: true,
+          });
+        }
+      }
+    } catch {
+      // Non-fatal: client signInWithOtp will still proceed
+    }
+
+    return { exists: true };
   });
 
 const resumeRegistrationByVerifiedEmailSchema = z.object({

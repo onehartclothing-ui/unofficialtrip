@@ -7,7 +7,25 @@ export const TRIP = {
   upiId: "gatepay.nkgsbank725538@icici",
   instagram: "titubagpackers",
   policyVersion: "2026-11-v1",
+  productionSiteUrl: "https://unofficialtrip-phi.vercel.app",
 } as const;
+
+/**
+ * Returns the canonical origin for authentication redirects.
+ * - In local development (`localhost` / `127.0.0.1`), uses the local origin.
+ * - In production, never falls back to localhost; uses `https://unofficialtrip-phi.vercel.app` or the live non-localhost origin.
+ */
+export function getAuthRedirectUrl(path = "/auth/callback"): string {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  if (typeof window !== "undefined" && window.location?.origin) {
+    const origin = window.location.origin;
+    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+    if (!isLocalhost || import.meta.env?.DEV) {
+      return `${origin}${cleanPath}`;
+    }
+  }
+  return `${TRIP.productionSiteUrl}${cleanPath}`;
+}
 
 /** Configurable cohort options for registration dropdown. */
 export const COHORT_OPTIONS = ["UGC 1", "UGC 2"] as const;

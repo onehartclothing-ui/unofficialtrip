@@ -9,6 +9,7 @@ import {
   buildUpiLink,
   buildIosUpiAppLinks,
   detectDevicePlatform,
+  getAuthRedirectUrl,
   validateEmail,
   normalizeIndianPhone,
 } from "@/lib/trip";
@@ -275,7 +276,16 @@ function DetailsStep({
   const [otpSent, setOtpSent] = useState(false);
   const [otpCode, setOtpCode] = useState("");
   const [returningBusy, setReturningBusy] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const returningRef = useRef(false);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => (prev > 1 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -366,7 +376,7 @@ function DetailsStep({
 
   async function requestReturningVerification(e: React.FormEvent) {
     e.preventDefault();
-    if (returningRef.current || returningBusy) return;
+    if (returningRef.current || returningBusy || resendCooldown > 0) return;
 
     const emailCheck = validateEmail(returningEmail);
     if (!emailCheck.valid) {
@@ -414,8 +424,7 @@ function DetailsStep({
         return;
       }
 
-      const redirectTo =
-        typeof window !== "undefined" ? `${window.location.origin}/register` : undefined;
+      const redirectTo = getAuthRedirectUrl("/auth/callback");
       const { error } = await supabase.auth.signInWithOtp({
         email: emailCheck.email,
         options: {
@@ -423,10 +432,18 @@ function DetailsStep({
           emailRedirectTo: redirectTo,
         },
       });
-      if (error) throw error;
+      if (error) {
+        if (/rate limit|too many|security purposes/i.test(error.message)) {
+          throw new Error(
+            "Please wait 60 seconds before requesting another verification code.",
+          );
+        }
+        throw error;
+      }
 
       setOtpSent(true);
-      toast.success("Verification email sent! Enter the code or click the link in your inbox.");
+      setResendCooldown(60);
+      toast.success("Verification code sent to your email!");
     } catch (err) {
       toast.error(errMsg(err));
     } finally {
@@ -446,23 +463,49 @@ function DetailsStep({
     }
 
     const token = otpCode.trim();
-    if (token.length < 6) {
-      toast.error("Please enter the verification code from your email");
+    if (!/^\d{6,8}$/.test(token)) {
+      toast.error("Please enter the 6-digit verification code from your email");
       return;
     }
 
     returningRef.current = true;
     setReturningBusy(true);
     try {
-      const { data: verifyData, error: verifyErr } = await supabase.auth.verifyOtp({
+      let verifyData: { session: { access_token: string } | null } | null = null;
+      let verifyErr: Error | null = null;
+
+      // Verify with type 'email' (covers both OTP login & magiclink OTPs in Supabase Auth),
+      // with fallback to 'signup' if an unconfirmed user received a signup OTP before template update.
+      const resEmail = await supabase.auth.verifyOtp({
         email: emailCheck.email,
         token,
         type: "email",
       });
 
+      if (!resEmail.error && resEmail.data?.session?.access_token) {
+        verifyData = resEmail.data;
+      } else {
+        const resSignup = await supabase.auth.verifyOtp({
+          email: emailCheck.email,
+          token,
+          type: "signup",
+        });
+        if (!resSignup.error && resSignup.data?.session?.access_token) {
+          verifyData = resSignup.data;
+        } else {
+          verifyErr = resEmail.error ?? resSignup.error;
+        }
+      }
+
       if (verifyErr || !verifyData?.session?.access_token) {
+        const rawErr = verifyErr?.message ?? "";
+        if (/expired/i.test(rawErr)) {
+          throw new Error(
+            "This verification code has expired. Please click 'Resend verification code' to get a new 6-digit code.",
+          );
+        }
         throw new Error(
-          verifyErr?.message ?? "Invalid or expired verification code. Please try again.",
+          "Incorrect or expired verification code. Please check the 6-digit code in your email or request a new one.",
         );
       }
 
@@ -588,8 +631,8 @@ function DetailsStep({
             Continue Your Booking
           </h2>
           <p className="mt-2 text-sm text-bone/80">
-            Enter the email address you registered with. We will send a one-time verification code
-            and sign-in link to confirm your identity and restore your booking.
+            Enter the email address you registered with. We will send a 6-digit verification code
+            to confirm your identity and restore your booking.
           </p>
 
           {!otpSent ? (
@@ -610,16 +653,24 @@ function DetailsStep({
                 />
               </label>
 
-              <button type="submit" disabled={returningBusy} className={primaryBtn}>
-                {returningBusy ? "Sending verification…" : "SEND VERIFICATION CODE →"}
+              <button
+                type="submit"
+                disabled={returningBusy || resendCooldown > 0}
+                className={primaryBtn}
+              >
+                {returningBusy
+                  ? "Sending verification…"
+                  : resendCooldown > 0
+                    ? `WAIT ${resendCooldown}S TO RESEND`
+                    : "SEND VERIFICATION CODE →"}
               </button>
             </form>
           ) : (
             <form onSubmit={verifyReturningOtp} className="mt-6 space-y-5">
               <div className="rounded-lg border border-border bg-ink/60 p-4 text-sm text-bone/90">
                 Verification code sent to{" "}
-                <span className="font-mono text-bone">{returningEmail}</span>. Enter the code from
-                your email below (or click the magic link in the email on this device).
+                <span className="font-mono text-bone">{returningEmail}</span>. Enter the 6-digit
+                verification code from your email below.
               </div>
 
               <label className="block">
@@ -631,10 +682,10 @@ function DetailsStep({
                   type="text"
                   inputMode="numeric"
                   required
-                  maxLength={10}
+                  maxLength={8}
                   placeholder="Enter 6-digit code"
                   value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value.replace(/\s+/g, ""))}
+                  onChange={(e) => setOtpCode(e.target.value.replace(/\D+/g, ""))}
                 />
               </label>
 
@@ -655,11 +706,13 @@ function DetailsStep({
                 </button>
                 <button
                   type="button"
-                  disabled={returningBusy}
+                  disabled={returningBusy || resendCooldown > 0}
                   onClick={(e) => void requestReturningVerification(e)}
-                  className="eyebrow text-muted-foreground hover:text-bone"
+                  className="eyebrow text-muted-foreground hover:text-bone disabled:opacity-50"
                 >
-                  Resend verification email
+                  {resendCooldown > 0
+                    ? `Resend code in ${resendCooldown}s`
+                    : "Resend verification code"}
                 </button>
               </div>
             </form>
