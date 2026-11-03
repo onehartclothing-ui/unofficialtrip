@@ -3,9 +3,11 @@ import { z } from "zod";
 import { TRIP, COHORT_OPTIONS, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 
 /**
- * Session TTL for completing UPI payment after submitting the registration form (24 hours).
+ * Session TTL for completing UPI payment after submitting or resuming a registration (7 days, renewed on every verified visit).
  */
-export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const REGISTRATION_EXISTS_CODE = "REGISTRATION_EXISTS" as const;
 
 export type GuestRegistrationSession = {
   id: string;
@@ -16,6 +18,7 @@ export type GuestRegistrationSession = {
   cohort: string | null;
   status: string;
   utr: string | null;
+  admin_note?: string | null;
   session_token: string;
   session_expires_at: string;
 };
@@ -127,7 +130,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
 
           if (conflicts && conflicts.length > 0) {
             throw new Error(
-              "An active or completed registration already exists with this email or phone number.",
+              "REGISTRATION_EXISTS: An active or completed registration already exists with this email or phone number. Please use 'Already Registered? Continue Your Booking' to verify your email and resume your booking.",
             );
           }
 
@@ -160,6 +163,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
             cohort: updated.cohort,
             status: updated.status,
             utr: updated.utr,
+            admin_note: updated.admin_note,
             session_token: newToken,
             session_expires_at: expiresAtIso,
           };
@@ -182,14 +186,14 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
       // unless they prove ownership with the active, unexpired session_token.
       if (!data.sessionToken || existingList.length > 1) {
         throw new Error(
-          "An active or completed registration already exists with this email or phone number.",
+          "REGISTRATION_EXISTS: This email or phone number is already registered. Please use 'Already Registered? Continue Your Booking' to verify your email and continue from where you left off.",
         );
       }
 
       const existing = existingList[0]!;
       if (existing.status === "pending_verification" || existing.status === "confirmed") {
         throw new Error(
-          `Payment has already been submitted for this registration (Ref: ${existing.booking_id}).`,
+          `REGISTRATION_EXISTS: Payment has already been submitted for this registration (Ref: ${existing.booking_id}). Please use 'Already Registered? Continue Your Booking' to check your status.`,
         );
       }
 
@@ -204,7 +208,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
         !constantTimeEqualHex(existing.session_token_hash, callerHash)
       ) {
         throw new Error(
-          "An active or completed registration already exists with this email or phone number.",
+          "REGISTRATION_EXISTS: This email or phone number is already registered. Please use 'Already Registered? Continue Your Booking' to verify your email and continue your booking.",
         );
       }
 
@@ -240,6 +244,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
         cohort: updated.cohort,
         status: updated.status,
         utr: updated.utr,
+        admin_note: updated.admin_note,
         session_token: newToken,
         session_expires_at: expiresAtIso,
       };
@@ -278,6 +283,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
       cohort: inserted.cohort,
       status: inserted.status,
       utr: inserted.utr,
+      admin_note: inserted.admin_note,
       session_token: newToken,
       session_expires_at: expiresAtIso,
     };
@@ -290,7 +296,7 @@ const verifyGuestSessionSchema = z.object({
 
 /**
  * Verifies an existing guest booking session on the server (e.g. when reopening or refreshing the website)
- * without creating duplicate registrations or exposing other students' data.
+ * and renews the session expiry so active bookings are not invalidated across visits.
  */
 export const getGuestRegistrationSessionServer = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => verifyGuestSessionSchema.parse(input))
@@ -304,21 +310,6 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       .maybeSingle();
 
     if (error || !reg) return null;
-
-    if (reg.status === "pending_verification" || reg.status === "confirmed") {
-      return {
-        id: reg.id,
-        booking_id: reg.booking_id,
-        full_name: reg.full_name,
-        email: reg.email,
-        phone: reg.phone,
-        cohort: reg.cohort,
-        status: reg.status,
-        utr: reg.utr,
-        session_token: "",
-        session_expires_at: reg.updated_at,
-      };
-    }
 
     const now = new Date();
     const callerHash = await hashBookingSessionToken(data.sessionToken);
@@ -334,6 +325,13 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       return null;
     }
 
+    // Renew session expiry on verified visit so active bookings stay valid
+    const renewedExpiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+    await supabaseAdmin
+      .from("registrations")
+      .update({ session_expires_at: renewedExpiresAtIso })
+      .eq("id", reg.id);
+
     return {
       id: reg.id,
       booking_id: reg.booking_id,
@@ -343,8 +341,116 @@ export const getGuestRegistrationSessionServer = createServerFn({ method: "POST"
       cohort: reg.cohort,
       status: reg.status,
       utr: reg.utr,
+      admin_note: reg.admin_note,
       session_token: data.sessionToken,
-      session_expires_at: reg.session_expires_at!,
+      session_expires_at: renewedExpiresAtIso,
+    };
+  });
+
+const checkRegistrationEmailSchema = z.object({
+  email: z.string().trim().max(255),
+});
+
+/**
+ * Checks whether a registration exists for the given email without leaking any PII or booking details.
+ * Used before sending a Supabase Auth email OTP / magic link to a returning student.
+ */
+export const checkRegistrationEmailExistsServer = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => checkRegistrationEmailSchema.parse(input))
+  .handler(async ({ data }): Promise<{ exists: boolean }> => {
+    const emailRes = validateEmail(data.email);
+    if (!emailRes.valid) {
+      throw new Error(emailRes.error ?? "Please enter a valid email address");
+    }
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: reg, error } = await supabaseAdmin
+      .from("registrations")
+      .select("id")
+      .eq("email", emailRes.email)
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { exists: Boolean(reg) };
+  });
+
+const resumeRegistrationByVerifiedEmailSchema = z.object({
+  accessToken: z.string().min(10, "Missing verification token"),
+});
+
+/**
+ * Securely resumes an existing registration after a returning student verifies ownership of their email
+ * via Supabase Auth (OTP or magic link). Verifies the Supabase Auth JWT on the server, matches the
+ * verified email to `public.registrations`, and issues a fresh renewable booking session token.
+ * Never allows access using an unverified email or phone number.
+ */
+export const resumeRegistrationByVerifiedEmailServer = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => resumeRegistrationByVerifiedEmailSchema.parse(input))
+  .handler(async ({ data }): Promise<GuestRegistrationSession> => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: userData, error: authErr } = await supabaseAdmin.auth.getUser(
+      data.accessToken,
+    );
+
+    if (authErr || !userData?.user?.email) {
+      throw new Error("Could not verify your email session. Please request a new verification code.");
+    }
+
+    const verifiedEmail = userData.user.email.trim().toLowerCase();
+
+    const { data: reg, error: findErr } = await supabaseAdmin
+      .from("registrations")
+      .select("*")
+      .eq("email", verifiedEmail)
+      .maybeSingle();
+
+    if (findErr) {
+      throw new Error(findErr.message);
+    }
+
+    if (!reg) {
+      throw new Error(
+        "No existing registration was found for this email. Please switch to 'New Student — Register' to create your booking.",
+      );
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const newToken = generateBookingSessionToken();
+    const newTokenHash = await hashBookingSessionToken(newToken);
+    const expiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+
+    const { data: updated, error: updateErr } = await supabaseAdmin
+      .from("registrations")
+      .update({
+        session_token_hash: newTokenHash,
+        session_expires_at: expiresAtIso,
+        updated_at: nowIso,
+      })
+      .eq("id", reg.id)
+      .select("*")
+      .single();
+
+    if (updateErr) {
+      throw new Error(updateErr.message);
+    }
+
+    return {
+      id: updated.id,
+      booking_id: updated.booking_id,
+      full_name: updated.full_name,
+      email: updated.email,
+      phone: updated.phone,
+      cohort: updated.cohort,
+      status: updated.status,
+      utr: updated.utr,
+      admin_note: updated.admin_note,
+      session_token: newToken,
+      session_expires_at: expiresAtIso,
     };
   });
 
@@ -397,11 +503,11 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
       !reg.session_token_hash ||
       !constantTimeEqualHex(reg.session_token_hash, callerHash)
     ) {
-      throw new Error("Invalid booking session. Please register again.");
+      throw new Error("Invalid booking session. Please verify your email under 'Already Registered? Continue Your Booking' to resume.");
     }
 
     if (isExpired) {
-      throw new Error("Your booking session has expired. Please start a new registration.");
+      throw new Error("Your booking session has expired. Please verify your email under 'Already Registered? Continue Your Booking' to continue.");
     }
 
     // Check duplicate UTR
@@ -437,14 +543,18 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
     }
 
     const nowIso = now.toISOString();
-    // Invalidate the one-time session token upon payment submission
+    const renewedToken = generateBookingSessionToken();
+    const renewedTokenHash = await hashBookingSessionToken(renewedToken);
+    const renewedExpiresAtIso = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+
+    // Rotate and keep a valid session token so the student can revisit and check their status anytime
     const { data: updated, error: updateErr } = await supabaseAdmin
       .from("registrations")
       .update({
         utr: cleanUtr,
         screenshot_path: finalPath,
-        session_token_hash: null,
-        session_expires_at: null,
+        session_token_hash: renewedTokenHash,
+        session_expires_at: renewedExpiresAtIso,
         terms_accepted_at: reg.terms_accepted_at ?? nowIso,
         refund_ack_accepted_at: reg.refund_ack_accepted_at ?? nowIso,
         policy_version: TRIP.policyVersion,
@@ -467,7 +577,8 @@ export const submitGuestPaymentServer = createServerFn({ method: "POST" })
       cohort: updated.cohort,
       status: updated.status,
       utr: updated.utr,
-      session_token: "",
-      session_expires_at: nowIso,
+      admin_note: updated.admin_note,
+      session_token: renewedToken,
+      session_expires_at: renewedExpiresAtIso,
     };
   });

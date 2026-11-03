@@ -9,7 +9,15 @@ import {
 
 const mockCreateGuestRegistrationServer = vi.fn();
 const mockGetGuestRegistrationSessionServer = vi.fn();
+const mockCheckRegistrationEmailExistsServer = vi.fn();
+const mockResumeRegistrationByVerifiedEmailServer = vi.fn();
 const mockSubmitGuestPaymentServer = vi.fn();
+
+const mockSignInWithOtp = vi.fn();
+const mockVerifyOtp = vi.fn();
+const mockOnAuthStateChange = vi.fn(() => ({
+  data: { subscription: { unsubscribe: vi.fn() } },
+}));
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (opts: { component: React.ComponentType }) => opts,
@@ -20,12 +28,24 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
+vi.mock("@/integrations/supabase/client", () => ({
+  supabase: {
+    auth: {
+      signInWithOtp: (...args: unknown[]) => mockSignInWithOtp(...args),
+      verifyOtp: (...args: unknown[]) => mockVerifyOtp(...args),
+      onAuthStateChange: (...args: unknown[]) => mockOnAuthStateChange(...args),
+    },
+  },
+}));
+
 vi.mock("@/lib/registration.functions", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/registration.functions")>();
   return {
     ...actual,
     createGuestRegistrationServer: (...args: unknown[]) => mockCreateGuestRegistrationServer(...args),
     getGuestRegistrationSessionServer: (...args: unknown[]) => mockGetGuestRegistrationSessionServer(...args),
+    checkRegistrationEmailExistsServer: (...args: unknown[]) => mockCheckRegistrationEmailExistsServer(...args),
+    resumeRegistrationByVerifiedEmailServer: (...args: unknown[]) => mockResumeRegistrationByVerifiedEmailServer(...args),
     submitGuestPaymentServer: (...args: unknown[]) => mockSubmitGuestPaymentServer(...args),
   };
 });
@@ -58,11 +78,16 @@ describe("Guest registration & payment flow (/register)", () => {
     window.sessionStorage?.clear?.();
     mockCreateGuestRegistrationServer.mockReset();
     mockGetGuestRegistrationSessionServer.mockReset();
+    mockCheckRegistrationEmailExistsServer.mockReset();
+    mockResumeRegistrationByVerifiedEmailServer.mockReset();
     mockSubmitGuestPaymentServer.mockReset();
+    mockSignInWithOtp.mockReset();
+    mockVerifyOtp.mockReset();
   });
 
   it("completes the full server-side guest registration and payment flow with booking session token verification", async () => {
     const sessionToken = "a".repeat(64);
+    const rotatedToken = "e".repeat(64);
     const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 
     const fakeSession = {
@@ -83,14 +108,14 @@ describe("Guest registration & payment flow (/register)", () => {
       ...fakeSession,
       status: "pending_verification",
       utr: "431298765432",
-      session_token: "",
+      session_token: rotatedToken,
     });
 
     render(<RegisterComponent />);
 
-    // 1. Confirm registration form renders directly without login/signup
-    expect(screen.queryByText(/Verify my email/i)).toBeNull();
-    expect(screen.queryByText(/Password/i)).toBeNull();
+    // 1. Confirm both "New Student — Register" and "Already Registered? Continue Your Booking" options appear
+    expect(screen.getByText("New Student — Register")).toBeInTheDocument();
+    expect(screen.getByText("Already Registered? Continue Your Booking")).toBeInTheDocument();
 
     // 2. Check the 4 required fields + summary + terms checkboxes + button
     const nameInput = screen.getByPlaceholderText("Your full name");
@@ -237,7 +262,7 @@ describe("Guest registration & payment flow (/register)", () => {
 
     const continueBtn = screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" });
 
-    // Scenario 6: Rapidly click Submit multiple times -> only 1 server call is made
+    // Rapidly click Submit multiple times -> only 1 server call is made
     fireEvent.click(continueBtn);
     fireEvent.click(continueBtn);
     fireEvent.click(continueBtn);
@@ -247,12 +272,12 @@ describe("Guest registration & payment flow (/register)", () => {
     });
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(1);
 
-    // Scenario 4: Go back from payment to registration
+    // Go back from payment to registration
     fireEvent.click(screen.getByRole("button", { name: /Edit registration details/i }));
     expect(screen.getByDisplayValue("Riya Patel")).toBeInTheDocument();
     expect(screen.getByDisplayValue("riya@mesabusinessschool.org")).toBeInTheDocument();
 
-    // Scenario 1 & 2: Go back to payment without changing details -> reuses same pending registration without extra server call
+    // Go back to payment without changing details -> reuses same pending registration without extra server call
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
     await waitFor(() => {
       expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
@@ -279,7 +304,7 @@ describe("Guest registration & payment flow (/register)", () => {
       },
     });
 
-    // Scenario 3 & 5 & 7: Student refreshes or closes and reopens the website
+    // Student refreshes or closes and reopens the website
     unmount();
 
     render(<RegisterComponent />);
@@ -294,6 +319,162 @@ describe("Guest registration & payment flow (/register)", () => {
         sessionToken: token2,
       },
     });
+  });
+
+  it("allows returning students with an existing email to verify via OTP and resume pending payment or view submitted/confirmed status across unlimited logins", async () => {
+    const recoveredToken1 = "1".repeat(64);
+    const recoveredToken2 = "2".repeat(64);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    const pendingReg = {
+      id: "22222222-2222-4222-8222-222222222222",
+      booking_id: "TB-COORG-RETURN1",
+      full_name: "Ananya Rao",
+      email: "ananya@mesabusinessschool.org",
+      phone: "+919876543219",
+      cohort: "UGC 2",
+      status: "registration_started",
+      utr: null,
+      session_token: recoveredToken1,
+      session_expires_at: expiresAt,
+    };
+
+    // Simulate a returning student who cleared browser storage / switched devices and tries to register with existing email
+    mockCreateGuestRegistrationServer.mockRejectedValueOnce(
+      new Error(
+        "REGISTRATION_EXISTS: This email or phone number is already registered. Please use 'Already Registered? Continue Your Booking' to verify your email and continue from where you left off.",
+      ),
+    );
+
+    mockCheckRegistrationEmailExistsServer.mockResolvedValue({ exists: true });
+    mockSignInWithOtp.mockResolvedValue({ data: {}, error: null });
+
+    // First verification attempt with wrong OTP fails (unauthorized user cannot access someone else's booking)
+    mockVerifyOtp
+      .mockResolvedValueOnce({
+        data: { session: null },
+        error: new Error("Token has expired or is invalid"),
+      })
+      .mockResolvedValueOnce({
+        data: { session: { access_token: "valid-supabase-jwt-token-1" } },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { session: { access_token: "valid-supabase-jwt-token-2" } },
+        error: null,
+      });
+
+    mockResumeRegistrationByVerifiedEmailServer
+      .mockResolvedValueOnce(pendingReg)
+      .mockResolvedValueOnce({
+        ...pendingReg,
+        status: "confirmed",
+        utr: "998877665544",
+        session_token: recoveredToken2,
+      });
+
+    const { unmount } = render(<RegisterComponent />);
+
+    // Student tries to fill out the new registration form with their already-registered email
+    fireEvent.change(screen.getByPlaceholderText("Your full name"), {
+      target: { value: "Ananya Rao" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("you@mesabusinessschool.org"), {
+      target: { value: "ananya@mesabusinessschool.org" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("+91 98765 43210"), {
+      target: { value: "+91 98765 43219" },
+    });
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "UGC 2" },
+    });
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]!);
+    fireEvent.click(checkboxes[1]!);
+
+    fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT →" }));
+
+    // Website recognizes existing registration and shows prompt to continue booking without re-registering
+    await waitFor(() => {
+      expect(screen.getByText("Existing registration found")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue Your Booking →" }));
+
+    // Returning student mode is active with email pre-filled
+    expect(screen.getByText("Returning Student · Secure Booking Recovery")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("ananya@mesabusinessschool.org")).toBeInTheDocument();
+
+    // Request verification code
+    fireEvent.click(screen.getByRole("button", { name: "SEND VERIFICATION CODE →" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Enter 6-digit code")).toBeInTheDocument();
+    });
+
+    expect(mockCheckRegistrationEmailExistsServer).toHaveBeenCalledWith({
+      data: { email: "ananya@mesabusinessschool.org" },
+    });
+    expect(mockSignInWithOtp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "ananya@mesabusinessschool.org",
+      }),
+    );
+
+    // Scenario 9: Unauthorized user enters wrong OTP -> denied access, stays on OTP screen
+    fireEvent.change(screen.getByPlaceholderText("Enter 6-digit code"), {
+      target: { value: "000000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "VERIFY & CONTINUE BOOKING →" }));
+
+    await waitFor(() => {
+      expect(mockVerifyOtp).toHaveBeenCalledTimes(1);
+    });
+    expect(mockResumeRegistrationByVerifiedEmailServer).not.toHaveBeenCalled();
+    expect(screen.queryByText("SCAN TO PAY")).toBeNull();
+
+    // Scenario 6: Student enters valid OTP -> resumes pending payment with no duplicate booking created
+    fireEvent.change(screen.getByPlaceholderText("Enter 6-digit code"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "VERIFY & CONTINUE BOOKING →" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("SCAN TO PAY")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/TB-COORG-RETURN1/)).toBeInTheDocument();
+    expect(mockResumeRegistrationByVerifiedEmailServer).toHaveBeenCalledWith({
+      data: { accessToken: "valid-supabase-jwt-token-1" },
+    });
+
+    // Scenario 7 & 10: Student clears storage / logs in again later after booking is confirmed
+    unmount();
+    window.localStorage?.clear?.();
+    window.sessionStorage?.clear?.();
+
+    render(<RegisterComponent />);
+
+    fireEvent.click(screen.getByText("Already Registered? Continue Your Booking"));
+    fireEvent.change(screen.getByPlaceholderText("you@mesabusinessschool.org"), {
+      target: { value: "ananya@mesabusinessschool.org" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "SEND VERIFICATION CODE →" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Enter 6-digit code")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Enter 6-digit code"), {
+      target: { value: "654321" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "VERIFY & CONTINUE BOOKING →" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("You're officially going to Coorg!")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Payment Verified")).toBeInTheDocument();
+    expect(screen.getByText("TB-COORG-RETURN1")).toBeInTheDocument();
   });
 
   it("handles PAY VIA UPI on iPhone Safari without triggering generic upi:// (preventing WhatsApp popup)", async () => {
