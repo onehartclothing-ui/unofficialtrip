@@ -106,6 +106,7 @@ function RootShell({ children }: { children: ReactNode }) {
       </head>
       <body>
         {children}
+        <script src="https://checkout.razorpay.com/v1/checkout.js" async></script>
         <Scripts />
       </body>
     </html>

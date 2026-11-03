@@ -18,6 +18,10 @@ import {
   submitGuestPaymentServer,
   type GuestRegistrationSession,
 } from "@/lib/registration.functions";
+import {
+  createRazorpayOrderServer,
+  verifyRazorpayPaymentServer,
+} from "@/lib/razorpay.functions";
 
 const SESSION_KEY = "titu_coorg2026_reg_v2";
 
@@ -469,9 +473,110 @@ function PaymentStep({
   const [utr, setUtr] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [razorpayLoading, setRazorpayLoading] = useState(false);
   const submittingRef = useRef(false);
 
   const iosLinks = buildIosUpiAppLinks(reg.booking_id);
+
+  async function handleRazorpayCheckout() {
+    if (razorpayLoading || busy) return;
+    setRazorpayLoading(true);
+    try {
+      // Ensure Razorpay script is ready
+      const win = window as unknown as {
+        Razorpay?: new (options: Record<string, unknown>) => {
+          open: () => void;
+          on: (event: string, handler: (response: Record<string, unknown>) => void) => void;
+        };
+      };
+
+      if (!win.Razorpay) {
+        // Load dynamically if script didn't finish loading
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = "https://checkout.razorpay.com/v1/checkout.js";
+          script.async = true;
+          script.onload = () => resolve();
+          script.onerror = () => reject(new Error("Failed to load Razorpay checkout SDK"));
+          document.body.appendChild(script);
+        });
+      }
+
+      if (!win.Razorpay) {
+        throw new Error("Razorpay SDK is not available.");
+      }
+
+      // 1. Create order on server
+      const order = await createRazorpayOrderServer({
+        data: {
+          registrationId: reg.id,
+          sessionToken: reg.session_token,
+        },
+      });
+
+      // 2. Open Razorpay modal
+      const options = {
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: order.name,
+        description: order.description,
+        order_id: order.order_id,
+        prefill: {
+          name: order.prefill.name,
+          email: order.prefill.email,
+          contact: order.prefill.contact,
+        },
+        theme: {
+          color: "#E86B35",
+        },
+        modal: {
+          ondismiss: () => {
+            setRazorpayLoading(false);
+            toast.info("Payment cancelled.");
+          },
+        },
+        handler: async (response: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) => {
+          setBusy(true);
+          try {
+            // 3. Verify signature on server
+            const verified = await verifyRazorpayPaymentServer({
+              data: {
+                registrationId: reg.id,
+                sessionToken: reg.session_token,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              },
+            });
+
+            toast.success("Payment verified successfully!");
+            onDone(verified);
+          } catch (err: unknown) {
+            toast.error(errMsg(err));
+          } finally {
+            setBusy(false);
+            setRazorpayLoading(false);
+          }
+        },
+      };
+
+      const rzp = new win.Razorpay(options);
+      rzp.on("payment.failed", (resp: Record<string, unknown>) => {
+        const error = (resp?.error as { description?: string })?.description || "Payment failed";
+        toast.error(`Payment failed: ${error}`);
+        setRazorpayLoading(false);
+      });
+      rzp.open();
+    } catch (err: unknown) {
+      toast.error(errMsg(err));
+      setRazorpayLoading(false);
+    }
+  }
 
   async function copy() {
     try {
@@ -596,10 +701,26 @@ function PaymentStep({
         </div>
 
         <div className="mt-8 border-t border-border pt-6">
+          {/* Razorpay Instant Checkout */}
+          <button
+            type="button"
+            onClick={handleRazorpayCheckout}
+            disabled={razorpayLoading || busy}
+            className={`${primaryBtn} mb-4 flex items-center justify-center text-center shadow-lg transition-transform active:scale-[0.99]`}
+          >
+            {razorpayLoading ? "PREPARING CHECKOUT…" : "PAY NOW WITH RAZORPAY (CARD / UPI / NETBANKING) →"}
+          </button>
+
+          <div className="my-5 flex items-center gap-3">
+            <div className="h-px flex-1 bg-border" />
+            <span className="eyebrow text-xs text-muted-foreground">OR PAY DIRECT VIA UPI</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+
           <button
             type="button"
             onClick={handlePayViaUpi}
-            className={`${primaryBtn} flex items-center justify-center text-center`}
+            className="flex w-full items-center justify-center rounded-full border border-border px-6 py-3.5 font-display text-lg text-bone transition-colors hover:border-ember hover:text-ember"
           >
             PAY VIA UPI →
           </button>

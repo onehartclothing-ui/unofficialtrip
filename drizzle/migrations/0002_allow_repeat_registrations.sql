@@ -23,3 +23,4 @@ create index if not exists idx_registrations_phone
 create index if not exists idx_registrations_utr
   on public.registrations (utr)
   where utr is not null;
+
