@@ -108,7 +108,6 @@ describe("Guest registration & payment flow (/register)", () => {
     const nameInput = screen.getByPlaceholderText("Enter your full name");
     const emailInput = screen.getByPlaceholderText("Enter your email address (optional)");
     const phoneInput = screen.getByPlaceholderText("Enter your 10-digit mobile number");
-    const cohortSelect = screen.getByRole("combobox");
 
     expect(screen.getByText("COORG 2026")).toBeInTheDocument();
     expect(screen.getByText("20–22 NOVEMBER")).toBeInTheDocument();
@@ -122,11 +121,10 @@ describe("Guest registration & payment flow (/register)", () => {
     const continueBtn = screen.getByRole("button", { name: "CONTINUE TO PAYMENT — ₹8,500" });
     expect(continueBtn).toBeDisabled();
 
-    // 3. Fill in details (name, phone, cohort with optional email)
+    // 3. Fill in details (name, phone with optional email; no cohort required)
     fireEvent.change(nameInput, { target: { value: "Aarav Sharma" } });
     fireEvent.change(emailInput, { target: { value: "aarav@mesabusinessschool.org" } });
     fireEvent.change(phoneInput, { target: { value: "+91 98765 43210" } });
-    fireEvent.change(cohortSelect, { target: { value: "UGC 1" } });
 
     // 4. Accept mandatory checkboxes
     const checkboxes = screen.getAllByRole("checkbox");
@@ -148,7 +146,7 @@ describe("Guest registration & payment flow (/register)", () => {
         fullName: "Aarav Sharma",
         email: "aarav@mesabusinessschool.org",
         phone: "+919876543210",
-        cohort: "UGC 1",
+        cohort: "C2",
         registrationId: undefined,
         sessionToken: undefined,
       },
@@ -285,9 +283,6 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.change(screen.getByPlaceholderText("Enter your 10-digit mobile number"), {
       target: { value: "+91 98765 43219" },
     });
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "UGC 1" },
-    });
 
     const checkboxes = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes[0]!);
@@ -314,9 +309,6 @@ describe("Guest registration & payment flow (/register)", () => {
     });
     fireEvent.change(screen.getByPlaceholderText("Enter your 10-digit mobile number"), {
       target: { value: "+91 98765 43219" },
-    });
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "UGC 2" },
     });
 
     const checkboxes2 = screen.getAllByRole("checkbox");
@@ -376,9 +368,6 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.change(screen.getByPlaceholderText("Enter your 10-digit mobile number"), {
       target: { value: "+91 98765 43211" },
     });
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "UGC 1" },
-    });
 
     const checkboxes = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes[0]!);
@@ -408,9 +397,9 @@ describe("Guest registration & payment flow (/register)", () => {
     });
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(1);
 
-    // Go back again and edit cohort from UGC 1 -> UGC 2 -> updates the SAME registration ID using sessionToken
+    // Go back again and edit name -> updates the SAME registration ID using sessionToken
     fireEvent.click(screen.getByRole("button", { name: /Edit registration details/i }));
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "UGC 2" } });
+    fireEvent.change(screen.getByPlaceholderText("Enter your full name"), { target: { value: "Riya S. Patel" } });
     fireEvent.click(screen.getByRole("button", { name: "CONTINUE TO PAYMENT — ₹8,500" }));
 
     await waitFor(() => {
@@ -419,10 +408,10 @@ describe("Guest registration & payment flow (/register)", () => {
     expect(mockCreateGuestRegistrationServer).toHaveBeenCalledTimes(2);
     expect(mockCreateGuestRegistrationServer).toHaveBeenLastCalledWith({
       data: {
-        fullName: "Riya Patel",
+        fullName: "Riya S. Patel",
         email: "riya@mesabusinessschool.org",
         phone: "+919876543211",
-        cohort: "UGC 2",
+        cohort: "C2",
         registrationId: session1.id,
         sessionToken: token1,
       },
@@ -473,9 +462,6 @@ describe("Guest registration & payment flow (/register)", () => {
     fireEvent.change(screen.getByPlaceholderText("Enter your 10-digit mobile number"), {
       target: { value: "+91 98765 43212" },
     });
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "UGC 1" },
-    });
 
     const checkboxes = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes[0]!);
@@ -491,7 +477,7 @@ describe("Guest registration & payment flow (/register)", () => {
         fullName: "Kabir Verma",
         email: null,
         phone: "+919876543212",
-        cohort: "UGC 1",
+        cohort: "C2",
         registrationId: undefined,
         sessionToken: undefined,
       },

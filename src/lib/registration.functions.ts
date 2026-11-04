@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { TRIP, COHORT_OPTIONS, validateEmail, normalizeIndianPhone } from "@/lib/trip";
+import { TRIP, validateEmail, normalizeIndianPhone } from "@/lib/trip";
 
 /**
  * Session TTL for completing UPI payment after submitting the registration form (7 days, renewed on every visit).
@@ -63,7 +63,7 @@ const createGuestRegSchema = z.object({
   fullName: z.string().trim().min(2, "Please enter your full name").max(100),
   email: z.string().trim().max(255).optional().nullable(),
   phone: z.string().trim().min(10).max(20),
-  cohort: z.string().trim().min(1, "Please select your cohort").max(100),
+  cohort: z.string().trim().max(100).optional().nullable(),
   registrationId: z.string().uuid().optional(),
   sessionToken: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
@@ -86,9 +86,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
       throw new Error(phoneRes.error ?? "Please enter a valid 10-digit Indian mobile number");
     }
 
-    if (!(COHORT_OPTIONS as readonly string[]).includes(data.cohort)) {
-      throw new Error("Please select a valid cohort");
-    }
+    const cohortValue = (data.cohort && data.cohort.trim()) ? data.cohort.trim() : "C2";
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
@@ -128,7 +126,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
               full_name: data.fullName,
               email: emailRes.email ?? `guest_${ownReg.booking_id.toLowerCase().replace(/[^a-z0-9]/g, "")}@titubackpackers.internal`,
               phone: phoneRes.phone,
-              cohort: data.cohort,
+              cohort: cohortValue,
               session_token_hash: newTokenHash,
               session_expires_at: expiresAtIso,
               terms_accepted_at: nowIso,
@@ -172,7 +170,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
       full_name: data.fullName,
       email: storedEmail,
       phone: phoneRes.phone,
-      cohort: data.cohort,
+      cohort: cohortValue,
       status: "registration_started" as const,
       session_token_hash: newTokenHash,
       session_expires_at: expiresAtIso,
@@ -218,6 +216,7 @@ export const createGuestRegistrationServer = createServerFn({ method: "POST" })
           ...basePayload,
           email: fallbackEmail,
           phone: fallbackPhone,
+          cohort: cohortValue,
           admin_note: `Contact: ${emailRes.email ?? "No email"} · ${phoneRes.phone}`,
         })
         .select("*")

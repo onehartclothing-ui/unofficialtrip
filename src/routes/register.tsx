@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { PageShell } from "@/components/site/PageShell";
 import {
   TRIP,
-  COHORT_OPTIONS,
   validateEmail,
   normalizeIndianPhone,
 } from "@/lib/trip";
@@ -219,7 +218,6 @@ function DetailsStep({
   const [fullName, setFullName] = useState(initial?.full_name ?? "");
   const [email, setEmail] = useState(initial?.email ?? "");
   const [phone, setPhone] = useState(initial?.phone ?? "");
-  const [cohort, setCohort] = useState(initial?.cohort ?? "");
   const [terms, setTerms] = useState(Boolean(initial));
   const [refund, setRefund] = useState(Boolean(initial));
   const [busy, setBusy] = useState(false);
@@ -247,11 +245,6 @@ function DetailsStep({
       return;
     }
 
-    if (!cohort) {
-      toast.error("Please select which cohort you are in");
-      return;
-    }
-
     if (!terms || !refund) {
       toast.error("Please accept the Terms & Conditions and no-refund policy");
       return;
@@ -266,7 +259,6 @@ function DetailsStep({
       initial.full_name === trimmedName &&
       (initial.email ?? null) === emailRes.email &&
       initial.phone === phoneRes.phone &&
-      initial.cohort === cohort &&
       initial.session_expires_at &&
       new Date(initial.session_expires_at).getTime() > Date.now() &&
       /^[0-9a-f]{64}$/.test(initial.session_token ?? "");
@@ -286,7 +278,7 @@ function DetailsStep({
           fullName: trimmedName,
           email: emailRes.email,
           phone: phoneRes.phone,
-          cohort,
+          cohort: "C2",
           registrationId: hasValidSessionToken ? initial.id : undefined,
           sessionToken: hasValidSessionToken ? initial.session_token : undefined,
         },
@@ -376,27 +368,6 @@ function DetailsStep({
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-        </label>
-
-        <label className="block">
-          <span className="eyebrow mb-2 block text-muted-foreground">
-            Which cohort are you in? *
-          </span>
-          <select
-            className={`${input} bg-ink`}
-            required
-            value={cohort}
-            onChange={(e) => setCohort(e.target.value)}
-          >
-            <option value="" disabled className="bg-ink text-muted-foreground">
-              Select your cohort
-            </option>
-            {COHORT_OPTIONS.map((opt) => (
-              <option key={opt} value={opt} className="bg-ink text-bone">
-                {opt}
-              </option>
-            ))}
-          </select>
         </label>
 
         <div className="rounded-xl border border-border bg-card p-5">
